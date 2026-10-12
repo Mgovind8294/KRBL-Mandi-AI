@@ -70,17 +70,47 @@ def api_session():
     return session
 
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_data(api_key, limit=100):
-    params = {"api-key": api_key, "format": "json", "limit": int(limit)}
-    response = api_session().get(API_URL, params=params, timeout=(5, 12))
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise ValueError("Unexpected government API response format")
-    rows = payload.get("records", [])
-    if not rows:
-        raise ValueError(payload.get("message", "The API returned no records"))
-    return standardize_columns(pd.DataFrame(rows))
+def fetch_data(api_key, limit=500):
+    """Fetch recent government records in pages; never substitute uploaded/sample data."""
+    page_size = 100
+    all_rows = []
+    offset = 0
+    total_available = None
+    session = api_session()
+
+    while offset < int(limit):
+        this_limit = min(page_size, int(limit) - offset)
+        params = {
+            "api-key": api_key,
+            "format": "json",
+            "limit": this_limit,
+            "offset": offset,
+            "sort[arrival_date]": "desc",
+        }
+        response = session.get(API_URL, params=params, timeout=(8, 20))
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Unexpected government API response format")
+        rows = payload.get("records", [])
+        if total_available is None:
+            try:
+                total_available = int(payload.get("total", 0))
+            except (TypeError, ValueError):
+                total_available = None
+        if not rows:
+            break
+        all_rows.extend(rows)
+        offset += len(rows)
+        if len(rows) < this_limit:
+            break
+
+    if not all_rows:
+        raise ValueError("The government API returned zero records. Check API access or retry later.")
+    result = standardize_columns(pd.DataFrame(all_rows))
+    result.attrs["api_total_available"] = total_available
+    result.attrs["api_rows_fetched"] = len(all_rows)
+    return result
 
 def read_uploaded_file(upload):
     if upload.name.lower().endswith((".xlsx", ".xls")):
@@ -141,13 +171,14 @@ def build_forecast(history, target_col, horizon):
     return pd.DataFrame(forecast_rows), float(mae), None
 
 st.title("🌾 KRBL Mandi AI — India Paddy Price Intelligence")
-st.caption("Government mandi observations + transparent historical forecasting. Estimates are not official government predictions or guaranteed market prices.")
+st.caption("Government mandi observations + transparent historical forecasting. Government price data is generally updated by the publisher, not tick-by-tick real time; forecasts are estimates.")
 
 with st.sidebar:
     st.header("Data configuration")
     api_key = st.text_input("data.gov.in API key", value=get_api_key(), type="password",
                             help="Keep the key private. For deployment use Streamlit App settings → Secrets.")
-    limit = st.select_slider("Government records to request", options=[100, 250, 500, 1000], value=100)
+    limit = st.select_slider("Recent government records to fetch", options=[100, 250, 500, 1000], value=500,
+                             help="Fetched in pages of 100, newest arrival dates requested first where the API supports sorting.")
     if st.button("Refresh government data", use_container_width=True):
         fetch_data.clear()
         st.rerun()
@@ -162,7 +193,10 @@ if api_key:
         with st.spinner("Connecting to Government of India mandi data…"):
             df = fetch_data(api_key, limit)
         data_source = "Live government API"
-        st.success(f"Government API connected — {len(df):,} records received. Data freshness depends on the official publisher.")
+        latest_api_date = df["Arrival Date"].max() if "Arrival Date" in df.columns else pd.NaT
+        date_note = latest_api_date.strftime("%d %b %Y") if pd.notna(latest_api_date) else "date unavailable"
+        st.success(f"Government API connected — {len(df):,} records fetched. Latest date in fetched records: {date_note}.")
+        st.caption("This is the latest date returned in the fetched sample, not a guarantee that every mandi has reported today.")
     except requests.exceptions.Timeout:
         st.warning("Government API timed out. This can happen during portal maintenance or network restrictions. Use the historical workbook option below; no sample data will be substituted.")
     except requests.exceptions.ConnectionError:
@@ -176,7 +210,7 @@ else:
     st.info("Government API key is not available. You can still use your historical Excel/CSV to run forecasts.")
 
 st.subheader("Historical workbook / offline fallback")
-st.write("Upload your existing Paddy Price Prediction Excel or a CSV. The original file is read in memory and is not changed or added to the public repository.")
+st.write("Upload your existing Paddy Price Prediction Excel or a CSV. The original file is read in memory and is not changed or added to the public repository. Live government data is attempted first whenever an API key is available.")
 uploaded = st.file_uploader("Upload historical mandi data (.xlsx, .xls, .csv)", type=["xlsx", "xls", "csv"])
 if uploaded is not None:
     try:
@@ -204,10 +238,12 @@ if "Arrival Date" not in df.columns:
 
 if "Commodity" in df.columns:
     commodities = sorted(df["Commodity"].dropna().astype(str).unique())
-    defaults = [x for x in commodities if "paddy" in x.lower() or "rice" in x.lower()]
-    selected = st.multiselect("Commodity", commodities, default=defaults[:1] or commodities[:1])
+    defaults = [x for x in commodities if "paddy" in x.lower() or "dhan" in x.lower()]
+    selected = st.multiselect("Commodity", commodities, default=defaults or commodities[:1])
     if selected:
         df = df[df["Commodity"].astype(str).isin(selected)]
+    elif data_source == "Live government API":
+        st.info("No commodity selected, so all fetched commodities are shown.")
 for col in ["State", "District", "Market", "Variety"]:
     if col in df.columns:
         opts = sorted(df[col].dropna().astype(str).unique())
