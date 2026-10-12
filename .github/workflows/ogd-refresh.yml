@@ -1,0 +1,106 @@
+name: Refresh official mandi data
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install data-fetch dependencies
+        run: python -m pip install --disable-pip-version-check requests pandas
+
+      - name: Fetch official OGD mandi records
+        env:
+          DATA_GOV_IN_API_KEY: ${{ secrets.DATA_GOV_IN_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import time
+          from pathlib import Path
+
+          import pandas as pd
+          import requests
+          from requests.adapters import HTTPAdapter
+          from urllib3.util.retry import Retry
+
+          api_key = os.getenv("DATA_GOV_IN_API_KEY", "").strip()
+          if not api_key:
+              print("Missing repository Actions secret DATA_GOV_IN_API_KEY.")
+              sys.exit(1)
+
+          url = "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070"
+          states = ["Punjab", "Haryana", "Uttar Pradesh", "Rajasthan", "Uttarakhand", "Delhi"]
+          session = requests.Session()
+          retry = Retry(total=3, connect=3, read=2, backoff_factor=2,
+                        status_forcelist=[429, 500, 502, 503, 504],
+                        allowed_methods=["GET"])
+          session.mount("https://", HTTPAdapter(max_retries=retry))
+          session.headers.update({"User-Agent": "KRBL-Mandi-AI-GitHubActions/1.0", "Accept": "application/json"})
+
+          rows = []
+          failures = []
+          for state in states:
+              params = {
+                  "api-key": api_key,
+                  "format": "json",
+                  "limit": 1000,
+                  "offset": 0,
+                  "filters[state.keyword]": state,
+              }
+              try:
+                  response = session.get(url, params=params, timeout=(15, 45))
+                  response.raise_for_status()
+                  payload = response.json()
+                  state_rows = payload.get("records", []) if isinstance(payload, dict) else []
+                  if state_rows:
+                      rows.extend(state_rows)
+                      print(f"{state}: fetched {len(state_rows)} records")
+                  else:
+                      message = payload.get("message") or payload.get("error") if isinstance(payload, dict) else "unexpected response"
+                      failures.append(f"{state}: no records ({str(message)[:120]})")
+                      print(f"{state}: no records returned")
+              except Exception as exc:
+                  # Do not print request URLs because they contain the API key.
+                  failures.append(f"{state}: {type(exc).__name__}")
+                  print(f"{state}: request failed ({type(exc).__name__})")
+
+          if not rows:
+              print("No government records retrieved; existing snapshot was left unchanged.")
+              print("Failures: " + "; ".join(failures))
+              sys.exit(1)
+
+          frame = pd.DataFrame(rows).drop_duplicates()
+          Path("data").mkdir(parents=True, exist_ok=True)
+          frame.to_csv("data/ogd_latest.csv", index=False, encoding="utf-8-sig")
+          print(f"Saved {len(frame)} unique records from {len(states)} state queries.")
+          if failures:
+              print("Partial state results: " + "; ".join(failures))
+          PY
+
+      - name: Commit updated snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/ogd_latest.csv
+          if git diff --cached --quiet; then
+            echo "Snapshot is unchanged; no commit needed."
+          else
+            git commit -m "Refresh official mandi data snapshot"
+            git push
+          fi
