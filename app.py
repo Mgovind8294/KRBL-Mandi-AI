@@ -323,6 +323,8 @@ with st.expander("AGMARKNET live connection (official price & arrival source)", 
 if st.session_state.get("agmarknet_live_rows") is not None:
     agmarknet_df = st.session_state["agmarknet_live_rows"].copy()
 if api_key and st.session_state.get("run_ogd_fetch", False):
+    # Consume the one-shot request before networking so reruns never repeat slow API calls.
+    st.session_state["run_ogd_fetch"] = False
     try:
         with st.spinner("Connecting to Government of India mandi data for six states…"):
             live_df = fetch_data(api_key, limit)
