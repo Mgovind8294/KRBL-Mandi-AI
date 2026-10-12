@@ -42,29 +42,46 @@ def _walk_dicts(value):
             yield from _walk_dicts(child)
 
 def _find_metadata_id(payload, terms, kind):
-    """Find a matching state/commodity ID in the public filter metadata without hard-coded IDs."""
+    """Resolve IDs from AGMARKNET's actual short-key filter arrays as well as alternate schemas."""
+    if not isinstance(payload, (dict, list)):
+        return None, None
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    short_key = {"state": "state_data", "commodity": "cmdt_data"}[kind]
+    rows = data.get(short_key, []) if isinstance(data, dict) else []
+    # Explicitly inspect the named array first: API fields are commonly abbreviated (state_name/cmdt_name).
+    if isinstance(rows, list):
+        id_candidates = {
+            "state": ("state_id", "stateId", "stateid", "state_code", "stateCode", "id", "value"),
+            "commodity": ("cmdt_id", "cmdtId", "cmdtid", "commodity_id", "commodityId", "commodityid", "comm_id", "commId", "commodity_code", "commodityCode", "id", "value"),
+        }[kind]
+        name_candidates = {
+            "state": ("state_name", "stateName", "statename", "state_desc", "stateDesc", "name", "label", "state"),
+            "commodity": ("cmdt_name", "cmdtName", "cmdtname", "cmdt_desc", "cmdtDesc", "commodity_name", "commodityName", "commodityname", "commodity_desc", "commodityDesc", "commodity_description", "comm_name", "commName", "commodity_name_en", "name", "label", "commodity"),
+        }[kind]
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = next((str(row[k]) for k in name_candidates if row.get(k) is not None), "")
+            ident = next((row[k] for k in id_candidates if row.get(k) is not None), None)
+            norm = " ".join(name.lower().replace("(dhan)", "").replace("(common)", "").replace("-", " ").split())
+            if ident is not None and name and any(term in norm for term in terms):
+                return ident, name
+    # Fallback for nested or alternate API payloads.
     id_keys = {
-        "state": ("state_id", "stateId", "stateid", "state_code", "stateCode", "stateid", "id", "value"),
-        "commodity": ("commodity_id", "commodityId", "commodityid", "comm_id", "commId", "cmdt_id", "cmdtId", "cmdtid", "commodity_code", "commodityCode", "id", "value"),
+        "state": ("state_id", "stateId", "stateid", "state_code", "stateCode", "id", "value"),
+        "commodity": ("cmdt_id", "cmdtId", "cmdtid", "commodity_id", "commodityId", "commodityid", "comm_id", "commId", "commodity_code", "commodityCode", "id", "value"),
     }[kind]
     name_keys = {
         "state": ("state_name", "stateName", "statename", "state_desc", "stateDesc", "name", "label", "state"),
-        "commodity": ("commodity_name", "commodityName", "commodityname", "cmdt_name", "cmdtName", "cmdtname", "cmdt_desc", "cmdtDesc", "commodity_desc", "commodityDesc", "commodity_description", "comm_name", "commName", "commodity_name_en", "name", "label", "commodity"),
+        "commodity": ("cmdt_name", "cmdtName", "cmdtname", "cmdt_desc", "cmdtDesc", "commodity_name", "commodityName", "commodityname", "commodity_desc", "commodityDesc", "commodity_description", "comm_name", "commName", "commodity_name_en", "name", "label", "commodity"),
     }[kind]
     candidates = []
     for item in _walk_dicts(payload):
         name = next((str(item[k]) for k in name_keys if k in item and item[k] is not None), "")
         ident = next((item[k] for k in id_keys if k in item and item[k] is not None), None)
-        if not name or ident is None:
-            continue
-        normalized = " ".join(name.lower().replace("(dhan)", "").replace("(common)", "").replace("-", " ").split())
-        if any(term in normalized for term in terms):
-            candidates.append((name, ident))
-    # Prefer exact match before substring matches.
-    for name, ident in candidates:
         norm = " ".join(name.lower().replace("(dhan)", "").replace("(common)", "").replace("-", " ").split())
-        if any(norm == term for term in terms):
-            return ident, name
+        if name and ident is not None and any(term in norm for term in terms):
+            candidates.append((name, ident))
     return (candidates[0][1], candidates[0][0]) if candidates else (None, None)
 
 def _extract_record_list(payload):
