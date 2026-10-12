@@ -59,7 +59,7 @@ def _find_metadata_id(payload, terms, kind):
         norm = " ".join(name.lower().replace("(dhan)", "").replace("(common)", "").replace("-", " ").split())
         if any(norm == term for term in terms):
             return ident, name
-    return candidates[0][1:] if candidates else (None, None)
+    return (candidates[0][1], candidates[0][0]) if candidates else (None, None)
 
 def _extract_record_list(payload):
     """Extract a list of row dictionaries from varying AGMARKNET JSON envelopes."""
@@ -84,7 +84,7 @@ def fetch_agmarknet_data():
     if not isinstance(metadata, (dict, list)):
         raise ValueError("AGMARKNET filter endpoint returned an unexpected response.")
     now = pd.Timestamp.now().normalize()
-    months = [(now.year, now.month), ((now - pd.offsets.MonthBegin(1)).year, (now - pd.offsets.MonthBegin(1)).month)]
+    previous_month = now - pd.DateOffset(months=1)\n    months = [(now.year, now.month), (previous_month.year, previous_month.month)]
     frames, errors = [], []
     for state in AGMARKNET_STATES:
         state_id, state_label = _find_metadata_id(metadata, [state.lower()], "state")
