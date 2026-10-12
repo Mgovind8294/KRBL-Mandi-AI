@@ -71,83 +71,39 @@ def api_session():
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_data(api_key, limit=500):
-    """Fetch paginated OGD records, retrying without sorting if the API rejects sort syntax."""
-    page_size = 100
+    """Fetch a bounded sample separately for each requested state; fail clearly if all calls fail."""
     session = api_session()
-    all_rows = []
-    total_available = None
-    sort_supported = True
-    offset = 0
-    max_records = max(1, int(limit))
-
-    while offset < max_records:
-        this_limit = min(page_size, max_records - offset)
-        base_params = {
-            "api-key": api_key,
-            "format": "json",
-            "limit": this_limit,
-            "offset": offset,
+    states = ["Punjab", "Haryana", "Uttar Pradesh", "Rajasthan", "Uttarakhand", "Delhi"]
+    per_state = max(50, min(1000, int(limit)))
+    all_rows, errors = [], []
+    totals = {}
+    for state in states:
+        params = {
+            "api-key": api_key, "format": "json", "limit": per_state, "offset": 0,
+            "filters[state.keyword]": state, "filters[commodity]": "Paddy"
         }
-        attempts = []
-        if sort_supported:
-            attempts.append({**base_params, "sort[arrival_date]": "desc"})
-        attempts.append(base_params)
-
-        response = None
-        last_error = None
-        for params in attempts:
-            try:
-                response = session.get(API_URL, params=params, timeout=(8, 20))
-                if response.status_code >= 400 and "sort[arrival_date]" in params:
-                    # Some OGD resources reject the sort parameter. Retry the same page without it.
-                    sort_supported = False
-                    continue
-                response.raise_for_status()
-                break
-            except requests.exceptions.RequestException as exc:
-                last_error = exc
-                if params == attempts[-1]:
-                    raise
-        if response is None:
-            if last_error:
-                raise last_error
-            raise ValueError("No response received from the government API.")
-
         try:
+            response = session.get(API_URL, params=params, timeout=(8, 25))
+            response.raise_for_status()
             payload = response.json()
-        except ValueError as exc:
-            raise ValueError("Government API returned a non-JSON response.") from exc
-
-        if not isinstance(payload, dict):
-            raise ValueError("Unexpected government API response format.")
-        if payload.get("error") or payload.get("message") and not payload.get("records"):
-            message = str(payload.get("error") or payload.get("message"))
-            raise ValueError(f"Government API response: {message[:240]}")
-
-        if total_available is None:
-            try:
-                total_available = int(payload.get("total", 0))
-            except (TypeError, ValueError):
-                total_available = None
-
-        rows = payload.get("records") or []
-        if not isinstance(rows, list):
-            raise ValueError("Government API 'records' field was not a list.")
-        if not rows:
-            break
-
-        all_rows.extend(rows)
-        offset += len(rows)
-        if len(rows) < this_limit:
-            break
-
+            if not isinstance(payload, dict):
+                raise ValueError("Unexpected response format")
+            if payload.get("error") or (payload.get("message") and not payload.get("records")):
+                raise ValueError(str(payload.get("error") or payload.get("message"))[:160])
+            rows = payload.get("records") or []
+            totals[state] = payload.get("total", len(rows))
+            # Some API records use "Paddy(Dhan)(Common)" or basmati labels.
+            all_rows.extend(rows)
+            if not rows:
+                errors.append(f"{state}: no matching records")
+        except Exception as exc:
+            errors.append(f"{state}: {type(exc).__name__}")
     if not all_rows:
-        raise ValueError("Government API returned zero records. Check API access or retry later.")
-
+        raise RuntimeError("Government API returned no records for the six selected states. " + "; ".join(errors))
     result = standardize_columns(pd.DataFrame(all_rows))
-    result.attrs["api_total_available"] = total_available
+    result.attrs["state_totals"] = totals
+    result.attrs["state_errors"] = errors
     result.attrs["api_rows_fetched"] = len(all_rows)
-    result.attrs["api_sort_supported"] = sort_supported
     return result
 
 def read_uploaded_file(upload):
@@ -226,44 +182,55 @@ with st.sidebar:
 
 df = None
 data_source = None
+live_df = None
+history_df = None
+api_errors = []
 if api_key:
     try:
-        with st.spinner("Connecting to Government of India mandi data…"):
-            df = fetch_data(api_key, limit)
-        data_source = "Live government API"
-        latest_api_date = df["Arrival Date"].max() if "Arrival Date" in df.columns else pd.NaT
+        with st.spinner("Connecting to Government of India mandi data for six states…"):
+            live_df = fetch_data(api_key, limit)
+        api_errors = live_df.attrs.get("state_errors", [])
+        latest_api_date = live_df["Arrival Date"].max() if "Arrival Date" in live_df.columns else pd.NaT
         date_note = latest_api_date.strftime("%d %b %Y") if pd.notna(latest_api_date) else "date unavailable"
-        st.success(f"Government API connected — {len(df):,} records fetched. Latest date in fetched records: {date_note}.")
-        if not df.attrs.get("api_sort_supported", True):
-            st.warning("The API did not accept the date-sort parameter. Records were fetched by API pagination order, so the sample may not contain the newest records.")
-        total_available = df.attrs.get("api_total_available")
-        if total_available:
-            st.caption(f"API reports approximately {total_available:,} total records for this resource; this dashboard fetched {len(df):,}.")
-        st.caption("This is the latest date returned in the fetched sample, not a guarantee that every mandi has reported today.")
+        st.success(f"Government API responded — {len(live_df):,} records across the six-state query. Latest observation in fetched rows: {date_note}.")
+        if api_errors:
+            st.warning("Some state requests returned no rows or failed: " + "; ".join(api_errors))
+        st.caption("Source is daily AGMARKNET/OGD data, not tick-by-tick real-time quotes. The latest returned date may differ by mandi.")
     except requests.exceptions.Timeout:
-        st.warning("Government API timed out. This can happen during portal maintenance or network restrictions. Use the historical workbook option below; no sample data will be substituted.")
+        st.warning("Government API timed out. Historical Excel will remain available; no sample/live-looking data is substituted.")
     except requests.exceptions.ConnectionError:
-        st.warning("The hosting service could not connect to api.data.gov.in. This is a network/service issue unless a separate API response confirms a key problem. Use historical data below.")
+        st.warning("Could not connect to api.data.gov.in from this hosting environment. Historical Excel remains available.")
     except requests.exceptions.HTTPError as exc:
         status = getattr(exc.response, "status_code", None)
-        st.warning(f"Government API returned HTTP {status or 'error'}. Check that the API key is valid, the resource is accessible, and the portal is available. The API key is not shown here.")
+        st.warning(f"Government API returned HTTP {status or 'error'}. Check the API key, resource access and portal status.")
     except Exception as exc:
-        st.warning(f"Government data could not be loaded ({type(exc).__name__}). Sensitive request details are hidden.")
+        st.warning(f"Government data could not be loaded ({type(exc).__name__}). Historical workbook mode remains available.")
 else:
-    st.info("Government API key is not available. You can still use your historical Excel/CSV to run forecasts.")
+    st.info("Government API key not configured. Configure DATA_GOV_IN_API_KEY in Streamlit Secrets to enable online data.")
 
 st.subheader("Historical workbook / offline fallback")
-st.write("Upload your existing Paddy Price Prediction Excel or a CSV. The original file is read in memory and is not changed or added to the public repository. Live government data is attempted first whenever an API key is available.")
+st.write("Upload your existing Paddy Price Prediction Excel. Its historical records are kept separate from official government observations, and the original workbook is not modified.")
 uploaded = st.file_uploader("Upload historical mandi data (.xlsx, .xls, .csv)", type=["xlsx", "xls", "csv"])
 if uploaded is not None:
     try:
-        uploaded_df = standardize_columns(read_uploaded_file(uploaded))
-        if df is None or st.checkbox("Use uploaded workbook instead of government API data", value=True):
-            df = uploaded_df
-            data_source = "Uploaded historical workbook"
-            st.success(f"Workbook loaded: {len(df):,} rows. Please check column mapping below.")
+        history_df = standardize_columns(read_uploaded_file(uploaded))
+        history_df["Data Source"] = "Historical Excel"
+        st.success(f"Historical workbook loaded: {len(history_df):,} rows. Original workbook remains unchanged.")
     except Exception as exc:
         st.error(f"Could not read the uploaded file ({type(exc).__name__}). Check that it is a valid Excel/CSV file.")
+
+if live_df is not None:
+    live_df["Data Source"] = "Government OGD/AGMARKNET"
+if live_df is not None and history_df is not None:
+    # Union schemas without overwriting the historical workbook's original observations.
+    df = pd.concat([history_df, live_df], ignore_index=True, sort=False)
+    data_source = "Combined: Historical Excel + Government OGD/AGMARKNET"
+elif history_df is not None:
+    df = history_df.copy()
+    data_source = "Historical Excel"
+elif live_df is not None:
+    df = live_df.copy()
+    data_source = "Government OGD/AGMARKNET"
 
 if df is None:
     st.markdown("### Next step")
@@ -287,7 +254,7 @@ if "Commodity" in df.columns:
         df = df[df["Commodity"].astype(str).isin(selected)]
     elif data_source == "Live government API":
         st.info("No commodity selected, so all fetched commodities are shown.")
-for col in ["State", "District", "Market", "Variety"]:
+for col in ["State", "District", "Market", "Variety", "Data Source"]:
     if col in df.columns:
         opts = sorted(df[col].dropna().astype(str).unique())
         selected = st.multiselect(col, opts, key=f"filter_{col}")
@@ -351,5 +318,5 @@ else:
     st.info("Arrival forecast needs at least 18 dated arrival-quantity observations. The current government price resource may not supply arrival quantity; use a workbook that includes a date and arrival quantity column.")
 
 st.divider()
-st.caption("Source: Government of India OGD / AGMARKNET when connected; otherwise the uploaded workbook. Forecasts are estimates. Check source dates, units, and holdout error before business use.")
+st.caption("Sources: Government of India OGD / AGMARKNET and uploaded historical workbook. Price observations are daily and may be delayed. Official source: https://www.data.gov.in/resource/current-daily-price-various-commodities-various-markets-mandi. Forecasts are estimates; do not interpret as guaranteed purchase prices.")
 
