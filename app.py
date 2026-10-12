@@ -410,8 +410,23 @@ if uploaded is not None:
     except Exception as exc:
         st.error(f"Could not read the uploaded file ({type(exc).__name__}). Check that it is a valid Excel/CSV file.")
 
+# If the live request from Streamlit Cloud fails, use the latest verified snapshot
+# written by the scheduled GitHub Actions workflow. Never fabricate records.
+if live_df is None and os.path.exists("data/ogd_latest.csv"):
+    try:
+        cached_df = standardize_columns(pd.read_csv("data/ogd_latest.csv"))
+        if not cached_df.empty and "Arrival Date" in cached_df.columns:
+            cached_df.attrs["cached"] = True
+            live_df = cached_df
+            st.info(
+                "Live government API is unreachable from this session. Showing the latest "
+                "GitHub Actions data snapshot instead; check the observation date before use."
+            )
+    except Exception as cache_exc:
+        st.warning(f"Could not read the saved government-data snapshot: {type(cache_exc).__name__}: {str(cache_exc)[:180]}")
+
 if live_df is not None:
-    live_df["Data Source"] = "Government OGD/AGMARKNET"
+    live_df["Data Source"] = "Government OGD/AGMARKNET (scheduled snapshot)" if live_df.attrs.get("cached") else "Government OGD/AGMARKNET"
 if live_df is not None and history_df is not None:
     # Union schemas without overwriting the historical workbook's original observations.
     df = pd.concat([history_df, live_df], ignore_index=True, sort=False)
