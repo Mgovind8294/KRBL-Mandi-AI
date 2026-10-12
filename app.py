@@ -1,7 +1,4 @@
 import os
-import time
-from datetime import timedelta
-
 import pandas as pd
 import plotly.express as px
 import requests
@@ -194,7 +191,12 @@ def standardize_columns(frame):
         "arrival quantity (tonnes)": "Arrival Quantity", "arrival (tonnes)": "Arrival Quantity",
         "quantity": "Arrival Quantity", "avg price rs qtl": "Modal Price (₹/qtl)",
         "avg price rs/qtl": "Modal Price (₹/qtl)", "avg price": "Modal Price (₹/qtl)",
-        "purchase qtl": "Purchase Quantity (Qtl)",
+        "purchase qtl": "Purchase Quantity (Qtl)", "purchase quantity": "Purchase Quantity (Qtl)",
+        "purchase quantity qtl": "Purchase Quantity (Qtl)", "arrival qtl": "Arrival Quantity",
+        "arrival quantity qtl": "Arrival Quantity", "arrival quantity quintal": "Arrival Quantity",
+        "avg price rs qtl": "Modal Price (₹/qtl)", "avg price rs/qtl": "Modal Price (₹/qtl)",
+        "avg price rs qtl": "Modal Price (₹/qtl)", "avg price rs qtl.": "Modal Price (₹/qtl)",
+        "avg price rs qtl": "Modal Price (₹/qtl)", "avg price rs/qtl.": "Modal Price (₹/qtl)",
     }
     for col in list(df.columns):
         clean = str(col).strip().lower().replace("-", " ").replace("_", " ")
@@ -208,7 +210,7 @@ def standardize_columns(frame):
         df["Market"] = "Unknown"
     if "Arrival Date" in df.columns:
         df["Arrival Date"] = pd.to_datetime(df["Arrival Date"], errors="coerce", dayfirst=True)
-    for col in ["Min Price (₹/qtl)", "Max Price (₹/qtl)", "Modal Price (₹/qtl)", "Arrival Quantity"]:
+    for col in ["Min Price (₹/qtl)", "Max Price (₹/qtl)", "Modal Price (₹/qtl)", "Arrival Quantity", "Purchase Quantity (Qtl)"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace(",", "", regex=False), errors="coerce")
     return df
@@ -323,7 +325,7 @@ def build_forecast(history, target_col, horizon):
     return pd.DataFrame(forecast_rows), float(mae), None
 
 st.title("🌾 KRBL Mandi AI — India Paddy Price Intelligence")
-st.caption("Government mandi observations + transparent historical forecasting. Government price data is updated by the publisher, not tick-by-tick real time; forecasts are estimates.")
+st.caption("Excel-first mandi intelligence: maintain a master history, append daily records, and forecast arrival and price from real uploaded data. Government API is optional; forecasts are estimates.")
 
 with st.sidebar:
     st.header("Data configuration")
@@ -399,16 +401,78 @@ elif not api_key:
 else:
     st.info("OGD is the recommended official data source. Click 'Load / refresh OGD data' in the sidebar to fetch current published records.")
 
-st.subheader("Historical workbook / offline fallback")
-st.write("Upload your existing Paddy Price Prediction Excel. Its historical records are kept separate from official government observations, and the original workbook is not modified.")
-uploaded = st.file_uploader("Upload historical mandi data (.xlsx, .xls, .csv)", type=["xlsx", "xls", "csv"])
-if uploaded is not None:
+st.subheader("Master Excel — daily data update")
+st.write(
+    "Upload the current master workbook containing all historical rows. Optionally upload a separate daily-update file to append new records. "
+    "The app preserves the master history, removes only exact duplicate rows, and lets you download the updated master. "
+    "For safety, download the updated file after every append and use it as the master on the next visit."
+)
+master_upload = st.file_uploader(
+    "1) Upload master history Excel/CSV (all previous records)",
+    type=["xlsx", "xls", "csv"],
+    key="master_history_upload",
+)
+daily_upload = st.file_uploader(
+    "2) Optional: upload today's new purchase/arrival Excel/CSV",
+    type=["xlsx", "xls", "csv"],
+    key="daily_history_upload",
+)
+master_df = None
+if master_upload is not None:
     try:
-        history_df = standardize_columns(read_uploaded_file(uploaded))
-        history_df["Data Source"] = "Historical Excel"
-        st.success(f"Historical workbook loaded: {len(history_df):,} rows. Original workbook remains unchanged.")
+        master_df = standardize_columns(read_uploaded_file(master_upload))
+        st.success(f"Master history loaded: {len(master_df):,} rows.")
     except Exception as exc:
-        st.error(f"Could not read the uploaded file ({type(exc).__name__}). Check that it is a valid Excel/CSV file.")
+        st.error(f"Could not read master file ({type(exc).__name__}). Please check the Excel/CSV format.")
+if daily_upload is not None:
+    try:
+        daily_df = standardize_columns(read_uploaded_file(daily_upload))
+        if master_df is not None:
+            combined_master = pd.concat([master_df, daily_df], ignore_index=True, sort=False)
+        else:
+            combined_master = daily_df.copy()
+        before_dedup = len(combined_master)
+        # Remove only exact duplicate rows. Do not deduplicate by date/mandi/variety because
+        # multiple genuine purchase lots can share those values.
+        combined_master = combined_master.drop_duplicates().reset_index(drop=True)
+        removed = before_dedup - len(combined_master)
+        history_df = combined_master.copy()
+        history_df["Data Source"] = "Master Excel"
+        st.success(
+            f"Daily update appended: {len(daily_df):,} rows. "
+            f"Master now contains {len(combined_master):,} unique rows"
+            + (f" ({removed:,} exact duplicate rows skipped)." if removed else ".")
+        )
+        export_master = combined_master.copy()
+        export_bytes = None
+        try:
+            from io import BytesIO
+            buffer = BytesIO()
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                export_master.to_excel(writer, sheet_name="Raw_Data", index=False)
+            export_bytes = buffer.getvalue()
+            st.download_button(
+                "Download updated master Excel",
+                data=export_bytes,
+                file_name="KRBL_Mandi_AI_Master_History.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        except Exception as export_exc:
+            st.warning(f"Excel export unavailable ({type(export_exc).__name__}); downloading master as CSV instead.")
+            st.download_button(
+                "Download updated master CSV",
+                data=export_master.to_csv(index=False).encode("utf-8-sig"),
+                file_name="KRBL_Mandi_AI_Master_History.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+    except Exception as exc:
+        st.error(f"Could not append daily update ({type(exc).__name__}). Please check the file format.")
+elif master_df is not None:
+    history_df = master_df.copy()
+    history_df["Data Source"] = "Master Excel"
+    st.info("Master history is loaded. Upload today's file above to append new rows, or continue forecasting from the master as-is.")
 
 # If the live request from Streamlit Cloud fails, use the latest verified snapshot
 # written by the scheduled GitHub Actions workflow. Never fabricate records.
@@ -440,10 +504,10 @@ elif live_df is not None:
 
 if df is None:
     st.markdown("### Next step")
-    st.write("No data is currently loaded. Live records may be unreachable because of API access, hosting-network, or portal availability issues. The app will not substitute fabricated or sample records.")
+    st.write("No data is currently loaded. Upload your master Excel history above; optionally append today’s update. The app never substitutes fabricated or sample records.")
     st.markdown("- Check the [official data.gov.in portal](https://data.gov.in/).")
     st.markdown("- Keep the API key in Streamlit Secrets; never publish it in GitHub or screenshots.")
-    st.markdown("- Upload your historical Excel above to activate forecasting while the API is unavailable.")
+    st.markdown("- Upload the master Excel above to activate forecasting while the API is unavailable.")
     st.stop()
 
 st.caption(f"Current data source: **{data_source}**")
