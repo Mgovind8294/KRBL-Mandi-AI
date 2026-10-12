@@ -225,46 +225,35 @@ def api_session():
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_data(api_key, limit=500):
-    """Fetch a bounded sample separately for each requested state; fail clearly if all calls fail."""
+    """Fetch one bounded page from the official OGD resource; avoid six sequential state calls that often time out."""
     session = api_session()
-    states = ["Punjab", "Haryana", "Uttar Pradesh", "Rajasthan", "Uttarakhand", "Delhi"]
-    per_state = max(50, min(1000, int(limit)))
-    all_rows, errors = [], []
-    totals = {}
-    for state in states:
-        params = {
-            "api-key": api_key, "format": "json", "limit": per_state, "offset": 0,
-            "filters[state.keyword]": state
-        }
-        try:
-            response = session.get(API_URL, params=params, timeout=(8, 25))
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise ValueError("Unexpected response format")
-            if payload.get("error") or (payload.get("message") and not payload.get("records")):
-                raise ValueError(str(payload.get("error") or payload.get("message"))[:160])
-            rows = payload.get("records") or []
-            totals[state] = payload.get("total", len(rows))
-            # Some API records use "Paddy(Dhan)(Common)" or basmati labels.
-            all_rows.extend(rows)
-            if not rows:
-                errors.append(f"{state}: no matching records")
-        except Exception as exc:
-            response = getattr(exc, "response", None)
-            status = getattr(response, "status_code", None)
-            detail = str(exc)[:180]
-            if response is not None and getattr(response, "text", ""):
-                detail += " | " + response.text[:180]
-            detail = detail.replace(api_key, "[REDACTED_API_KEY]") if api_key else detail
-            errors.append(f"{state}: HTTP {status}: {detail}" if status else f"{state}: {type(exc).__name__}: {detail}")
-    if not all_rows:
-        raise RuntimeError("Government API returned no records for the six selected states. " + "; ".join(errors))
-    result = standardize_columns(pd.DataFrame(all_rows))
-    result.attrs["state_totals"] = totals
-    result.attrs["state_errors"] = errors
-    result.attrs["api_rows_fetched"] = len(all_rows)
-    return result
+    params = {
+        "api-key": api_key,
+        "format": "json",
+        "limit": max(100, min(1000, int(limit))),
+        "offset": 0,
+    }
+    try:
+        response = session.get(API_URL, params=params, timeout=(10, 35))
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Unexpected OGD response format")
+        if payload.get("error") or (payload.get("message") and not payload.get("records")):
+            raise RuntimeError(str(payload.get("error") or payload.get("message"))[:200])
+        rows = payload.get("records") or []
+        if not rows:
+            raise RuntimeError("OGD returned zero records for the requested page.")
+        result = standardize_columns(pd.DataFrame(rows))
+        result.attrs["api_rows_fetched"] = len(result)
+        result.attrs["api_total_records"] = payload.get("total", "not supplied")
+        result.attrs["state_errors"] = []
+        result.attrs["fetch_scope"] = "Single recent OGD page; state coverage depends on API ordering and page size."
+        return result
+    except Exception as exc:
+        # Never expose a key if an upstream error echoes the query URL.
+        detail = str(exc).replace(api_key, "[REDACTED_API_KEY]") if api_key else str(exc)
+        raise RuntimeError(f"Official OGD request failed: {type(exc).__name__}: {detail[:300]}") from exc
 
 def read_uploaded_file(upload):
     if upload.name.lower().endswith((".xlsx", ".xls")):
@@ -343,14 +332,14 @@ def build_forecast(history, target_col, horizon):
     return pd.DataFrame(forecast_rows), float(mae), None
 
 st.title("🌾 KRBL Mandi AI — India Paddy Price Intelligence")
-st.caption("Excel-first mandi intelligence: maintain a master history, append daily records, and forecast arrival and price from real uploaded data. Government API is optional; forecasts are estimates.")
+st.caption("Government OGD price feed + scheduled snapshot fallback + authorized KRBL purchase data. Only verified records are shown; forecasts are estimates.")
 
 with st.sidebar:
     st.header("Data configuration")
     api_key = st.text_input("data.gov.in API key", value=get_api_key(), type="password",
                             help="Keep the key private. For deployment use Streamlit App settings → Secrets.")
     limit = st.select_slider("Recent government records to fetch", options=[100, 250, 500, 1000], value=500,
-                             help="Fetched in pages of 100, newest arrival dates requested first where the API supports sorting.")
+                             help="Fetches one bounded page from the official OGD API to avoid repeated slow state-specific requests. State coverage depends on the records returned.")
     if st.button("Load / refresh OGD data", use_container_width=True):
         fetch_data.clear()
         st.session_state["run_ogd_fetch"] = True
@@ -390,15 +379,15 @@ if api_key and st.session_state.get("run_ogd_fetch", False):
     # Consume the one-shot request before networking so reruns never repeat slow API calls.
     st.session_state["run_ogd_fetch"] = False
     try:
-        with st.spinner("Connecting to Government of India mandi data for six states…"):
+        with st.spinner("Connecting to the official Government of India mandi dataset…"):
             live_df = fetch_data(api_key, limit)
         api_errors = live_df.attrs.get("state_errors", [])
         latest_api_date = live_df["Arrival Date"].max() if "Arrival Date" in live_df.columns else pd.NaT
         date_note = latest_api_date.strftime("%d %b %Y") if pd.notna(latest_api_date) else "date unavailable"
-        st.success(f"Government API responded — {len(live_df):,} records across the six-state query. Latest observation in fetched rows: {date_note}.")
+        st.success(f"Government API responded — {len(live_df):,} official records returned. Latest observation in fetched rows: {date_note}.")
         if api_errors:
             st.warning("Some state requests returned no rows or failed: " + "; ".join(api_errors))
-        st.caption("Source is daily AGMARKNET/OGD data, not tick-by-tick real-time quotes. The latest returned date may differ by mandi.")
+        st.caption("This is the latest published OGD page, not tick-by-tick real-time data. A bounded page may not include every state or mandi; verify the returned date and filters.")
     except requests.exceptions.Timeout:
         st.warning("Government API timed out. Historical Excel will remain available; no sample/live-looking data is substituted.")
     except requests.exceptions.ConnectionError:
@@ -522,7 +511,7 @@ elif live_df is not None:
 
 if df is None:
     st.markdown("### Next step")
-    st.write("No data is currently loaded. Upload your master Excel history above; optionally append today’s update. The app never substitutes fabricated or sample records.")
+    st.write("No verified records are currently available in the live request or saved snapshot. The app will not substitute fabricated/sample records. Check the OGD connection or enable the scheduled snapshot workflow.")
     st.markdown("- Check the [official data.gov.in portal](https://data.gov.in/).")
     st.markdown("- Keep the API key in Streamlit Secrets; never publish it in GitHub or screenshots.")
     st.markdown("- Upload the master Excel above to activate forecasting while the API is unavailable.")
