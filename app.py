@@ -537,38 +537,13 @@ elif live_df is not None:
     data_source = "Government OGD/AGMARKNET"
 
 if df is None:
-    # Explicitly synthetic seed rows so the dashboard layout can be tested/submitted
-    # while the government API is unreachable. These are NOT real market observations.
-    demo_rows = []
-    demo_markets = [
-        ("Punjab", "Sangrur", "Dhuri Mandi", 4520, 540),
-        ("Punjab", "Patiala", "Nabha Mandi", 4480, 470),
-        ("Haryana", "Sirsa", "Sirsa Mandi", 4550, 560),
-        ("Haryana", "Karnal", "Karnal Mandi", 4590, 510),
-    ]
-    demo_dates = pd.date_range(end=pd.Timestamp.today().normalize(), periods=21, freq="D")
-    for day_idx, day in enumerate(demo_dates):
-        for market_idx, (state, district, market, base_price, base_arrival) in enumerate(demo_markets):
-            price = base_price + ((day_idx * 17 + market_idx * 13) % 95) - 35
-            arrival = base_arrival + ((day_idx * 29 + market_idx * 41) % 180) - 70
-            demo_rows.append({
-                "State": state, "District": district, "Market": market,
-                "Commodity": "Paddy (Basmati) — DEMO",
-                "Variety": ["Pusa 1121", "Pusa 1509", "Pusa 1718", "Pusa 1885"][market_idx],
-                "Arrival Date": day,
-                "Min Price (₹/qtl)": price - 80,
-                "Max Price (₹/qtl)": price + 90,
-                "Modal Price (₹/qtl)": price,
-                "Arrival Quantity": arrival,
-                "Data Source": "DEMO / TESTING ONLY — NOT OFFICIAL DATA",
-            })
-    df = pd.DataFrame(demo_rows)
-    data_source = "DEMO / TESTING ONLY — synthetic placeholder data"
-    st.warning(
-        "🧪 TESTING MODE: Government API/snapshot and uploaded history are unavailable. "
-        "The records below are synthetic placeholder data used only to test the dashboard structure. "
-        "They are NOT actual mandi prices, arrivals, or KRBL purchase records. Do not use for procurement or reporting."
-    )
+    st.markdown("### Government data connection")
+    st.error("No verified government records are available in this session. The live API request or saved official snapshot is unavailable.")
+    st.write("Demo/sample records are disabled. This dashboard will show real records only after the official feed connects or you upload a verified data workbook.")
+    st.markdown("- Check the [official data.gov.in portal](https://www.data.gov.in/).")
+    st.markdown("- Keep the API key in Streamlit Secrets; never publish it in GitHub or screenshots.")
+    st.markdown("- Upload a verified master Excel above to use the dashboard while the API is unavailable.")
+    st.stop()
 
 st.caption(f"Current data source: **{data_source}**")
 if "State" in df.columns:
