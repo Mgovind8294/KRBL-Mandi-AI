@@ -38,8 +38,11 @@ def standardize_columns(frame):
         "modal_price": "Modal Price (₹/qtl)", "modal price": "Modal Price (₹/qtl)",
         "modal price (₹/qtl)": "Modal Price (₹/qtl)", "price": "Modal Price (₹/qtl)",
         "arrival": "Arrival Quantity", "arrivals": "Arrival Quantity",
-        "arrival quantity": "Arrival Quantity", "arrival quantity (tonnes)": "Arrival Quantity",
-        "arrival (tonnes)": "Arrival Quantity", "quantity": "Arrival Quantity",
+        "arrival qtl": "Arrival Quantity", "arrival quantity": "Arrival Quantity",
+        "arrival quantity (tonnes)": "Arrival Quantity", "arrival (tonnes)": "Arrival Quantity",
+        "quantity": "Arrival Quantity", "avg price rs qtl": "Modal Price (₹/qtl)",
+        "avg price rs/qtl": "Modal Price (₹/qtl)", "avg price": "Modal Price (₹/qtl)",
+        "purchase qtl": "Purchase Quantity (Qtl)",
     }
     for col in list(df.columns):
         clean = str(col).strip().lower().replace("-", " ").replace("_", " ")
@@ -81,7 +84,10 @@ def fetch_data(api_key, limit=100):
 
 def read_uploaded_file(upload):
     if upload.name.lower().endswith((".xlsx", ".xls")):
-        return pd.read_excel(upload)
+        # Prefer the workbook historical transaction sheet over the dashboard/control sheets.
+        book = pd.ExcelFile(upload)
+        sheet = "Raw_Data" if "Raw_Data" in book.sheet_names else book.sheet_names[0]
+        return pd.read_excel(book, sheet_name=sheet)
     return pd.read_csv(upload)
 
 def build_forecast(history, target_col, horizon):
