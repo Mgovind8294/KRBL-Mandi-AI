@@ -224,34 +224,61 @@ def api_session():
     return session
 
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_data(api_key, limit=500):
-    """Fetch one bounded page from the official OGD resource; avoid six sequential state calls that often time out."""
+def fetch_data(api_key, limit=1000):
+    """Fetch multiple pages from the official OGD resource, then retain the six configured states."""
     session = api_session()
-    params = {
-        "api-key": api_key,
-        "format": "json",
-        "limit": max(100, min(1000, int(limit))),
-        "offset": 0,
+    page_size = max(100, min(1000, int(limit)))
+    params = {"api-key": api_key, "format": "json", "limit": page_size, "offset": 0}
+    state_aliases = {
+        "punjab": "Punjab", "haryana": "Haryana",
+        "uttar pradesh": "Uttar Pradesh", "uttarakhand": "Uttarakhand",
+        "rajasthan": "Rajasthan", "delhi": "Delhi",
+        "nct of delhi": "Delhi", "national capital territory of delhi": "Delhi",
     }
+    all_rows, total = [], None
+    # OGD can report a large nationwide total. Cap requests for predictable app response time;
+    # the sidebar will report whether the full reported result set was downloaded.
+    max_pages = 30
     try:
-        response = session.get(API_URL, params=params, timeout=(10, 35))
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError("Unexpected OGD response format")
-        if payload.get("error") or (payload.get("message") and not payload.get("records")):
-            raise RuntimeError(str(payload.get("error") or payload.get("message"))[:200])
-        rows = payload.get("records") or []
-        if not rows:
-            raise RuntimeError("OGD returned zero records for the requested page.")
-        result = standardize_columns(pd.DataFrame(rows))
+        for page in range(max_pages):
+            params["offset"] = page * page_size
+            response = session.get(API_URL, params=params, timeout=(10, 35))
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Unexpected OGD response format")
+            if payload.get("error") or (payload.get("message") and not payload.get("records")):
+                raise RuntimeError(str(payload.get("error") or payload.get("message"))[:200])
+            rows = payload.get("records") or []
+            if not rows:
+                break
+            all_rows.extend(rows)
+            if total is None:
+                try:
+                    total = int(payload.get("total"))
+                except (TypeError, ValueError):
+                    total = None
+            print(f"OGD page {page + 1}: {len(rows)} rows; downloaded {len(all_rows)}")
+            if len(rows) < page_size or (total is not None and len(all_rows) >= total):
+                break
+        if not all_rows:
+            raise RuntimeError("OGD returned zero records.")
+        result = standardize_columns(pd.DataFrame(all_rows)).drop_duplicates().reset_index(drop=True)
+        if "State" not in result.columns:
+            raise RuntimeError("OGD response did not include a recognizable State column.")
+        result["State"] = result["State"].astype(str).str.strip().replace(state_aliases)
+        result = result[result["State"].astype(str).str.lower().isin(state_aliases)].copy()
+        if result.empty:
+            raise RuntimeError("OGD pages loaded, but none of the records matched the six configured states.")
         result.attrs["api_rows_fetched"] = len(result)
-        result.attrs["api_total_records"] = payload.get("total", "not supplied")
+        result.attrs["api_total_records"] = total if total is not None else "not supplied"
+        result.attrs["api_pages_fetched"] = page + 1
+        result.attrs["api_rows_downloaded"] = len(all_rows)
+        result.attrs["api_complete"] = (total is not None and len(all_rows) >= total)
         result.attrs["state_errors"] = []
-        result.attrs["fetch_scope"] = "Single recent OGD page; state coverage depends on API ordering and page size."
+        result.attrs["fetch_scope"] = "Official OGD pages filtered to Punjab, Haryana, Uttar Pradesh, Rajasthan, Uttarakhand and Delhi."
         return result
     except Exception as exc:
-        # Never expose a key if an upstream error echoes the query URL.
         detail = str(exc).replace(api_key, "[REDACTED_API_KEY]") if api_key else str(exc)
         raise RuntimeError(f"Official OGD request failed: {type(exc).__name__}: {detail[:300]}") from exc
 
@@ -338,8 +365,8 @@ with st.sidebar:
     st.header("Data configuration")
     api_key = st.text_input("data.gov.in API key", value=get_api_key(), type="password",
                             help="Keep the key private. For deployment use Streamlit App settings → Secrets.")
-    limit = st.select_slider("Recent government records to fetch", options=[100, 250, 500, 1000], value=500,
-                             help="Fetches one bounded page from the official OGD API to avoid repeated slow state-specific requests. State coverage depends on the records returned.")
+    limit = st.select_slider("Government API page size", options=[250, 500, 1000], value=1000,
+                             help="Downloads multiple official OGD pages (up to 30) and then filters to Punjab, Haryana, Uttar Pradesh, Rajasthan, Uttarakhand and Delhi. Full coverage depends on API availability and the reported total.")
     if st.button("Load / refresh OGD data", use_container_width=True):
         fetch_data.clear()
         st.session_state["run_ogd_fetch"] = True
@@ -387,7 +414,7 @@ if api_key and st.session_state.get("run_ogd_fetch", False):
         st.success(f"Government API responded — {len(live_df):,} official records returned. Latest observation in fetched rows: {date_note}.")
         if api_errors:
             st.warning("Some state requests returned no rows or failed: " + "; ".join(api_errors))
-        st.caption("This is the latest published OGD page, not tick-by-tick real-time data. A bounded page may not include every state or mandi; verify the returned date and filters.")
+        st.caption(f"Official OGD pagination: {live_df.attrs.get('api_pages_fetched', 'unknown')} page(s), {live_df.attrs.get('api_rows_downloaded', len(live_df)):,} rows downloaded; reported nationwide total: {live_df.attrs.get('api_total_records', 'not supplied')}. Full nationwide coverage fetched: {'Yes' if live_df.attrs.get('api_complete') else 'No / not confirmed'}. Results are filtered to the six configured states; prices are daily published observations, not tick-by-tick live data.")
     except requests.exceptions.Timeout:
         st.warning("Government API timed out. Historical Excel will remain available; no sample/live-looking data is substituted.")
     except requests.exceptions.ConnectionError:
@@ -544,6 +571,10 @@ if df is None:
     )
 
 st.caption(f"Current data source: **{data_source}**")
+if "State" in df.columns:
+    st.caption("State coverage in loaded records: " + ", ".join(sorted(df["State"].dropna().astype(str).unique())))
+if "Market" in df.columns and "District" in df.columns:
+    st.caption(f"Loaded geography: {df['State'].nunique() if 'State' in df.columns else 0} state(s), {df['District'].nunique()} district(s), {df['Market'].nunique()} market/mandi name(s), {df['Variety'].nunique() if 'Variety' in df.columns else 0} variety label(s). Counts reflect returned records, not an authoritative master directory.")
 if "Arrival Date" not in df.columns:
     st.error("Date column was not recognized. Rename the date column to 'Arrival Date' or 'Date' and upload again.")
     st.dataframe(df.head(10), use_container_width=True)
@@ -552,7 +583,7 @@ if "Arrival Date" not in df.columns:
 if "Commodity" in df.columns:
     commodities = sorted(df["Commodity"].dropna().astype(str).unique())
     defaults = [x for x in commodities if "paddy" in x.lower() or "dhan" in x.lower()]
-    selected = st.multiselect("Commodity", commodities, default=defaults or commodities[:1])
+    selected = st.multiselect("Commodity / Variety coverage", commodities, default=defaults or commodities)
     if selected:
         df = df[df["Commodity"].astype(str).isin(selected)]
     elif data_source == "Live government API":
