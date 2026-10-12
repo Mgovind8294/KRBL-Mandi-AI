@@ -38,12 +38,12 @@ def _walk_dicts(value):
 def _find_metadata_id(payload, terms, kind):
     """Find a matching state/commodity ID in the public filter metadata without hard-coded IDs."""
     id_keys = {
-        "state": ("state_id", "stateId", "stateid", "id", "value"),
-        "commodity": ("commodity_id", "commodityId", "commodityid", "id", "value"),
+        "state": ("state_id", "stateId", "stateid", "state_code", "stateCode", "id", "value"),
+        "commodity": ("commodity_id", "commodityId", "commodityid", "comm_id", "commId", "commodity_code", "commodityCode", "id", "value"),
     }[kind]
     name_keys = {
-        "state": ("state_name", "stateName", "statename", "name", "label", "state"),
-        "commodity": ("commodity_name", "commodityName", "commodityname", "name", "label", "commodity"),
+        "state": ("state_name", "stateName", "statename", "state_desc", "stateDesc", "name", "label", "state"),
+        "commodity": ("commodity_name", "commodityName", "commodityname", "commodity_desc", "commodityDesc", "commodity_description", "comm_name", "commName", "commodity_name_en", "name", "label", "commodity"),
     }[kind]
     candidates = []
     for item in _walk_dicts(payload):
@@ -99,8 +99,15 @@ def fetch_agmarknet_data():
             "commodity",
         )
         if commodity_id is None:
-            errors.append("Paddy commodity ID not found in AGMARKNET filters")
-            break
+            commodity_candidates = []
+            for item in _walk_dicts(metadata):
+                keys = {str(k).lower() for k in item.keys()}
+                if any("commod" in k or "comm_" in k for k in keys):
+                    commodity_candidates.append({str(k): str(v)[:80] for k, v in item.items() if not isinstance(v, (dict, list))})
+                if len(commodity_candidates) >= 8:
+                    break
+            sample = repr(commodity_candidates[:5])[:700]
+            raise RuntimeError("Paddy commodity ID not found in AGMARKNET filters; metadata field mapping needs adjustment. Filter sample: " + sample)
         for year, month in months:
             try:
                 resp = session.get(
