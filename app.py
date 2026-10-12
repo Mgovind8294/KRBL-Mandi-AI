@@ -249,7 +249,12 @@ def fetch_data(api_key, limit=500):
             if not rows:
                 errors.append(f"{state}: no matching records")
         except Exception as exc:
-            errors.append(f"{state}: {type(exc).__name__}: {str(exc)[:180]}")
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            detail = str(exc)[:180]
+            if response is not None and getattr(response, "text", ""):
+                detail += " | " + response.text[:180]
+            errors.append(f"{state}: HTTP {status}: {detail}" if status else f"{state}: {type(exc).__name__}: {detail}")
     if not all_rows:
         raise RuntimeError("Government API returned no records for the six selected states. " + "; ".join(errors))
     result = standardize_columns(pd.DataFrame(all_rows))
@@ -381,7 +386,7 @@ if api_key and st.session_state.get("run_ogd_fetch", False):
         status = getattr(exc.response, "status_code", None)
         st.warning(f"Government API returned HTTP {status or 'error'}. Check the API key, resource access and portal status.")
     except Exception as exc:
-        st.warning(f"Government data could not be loaded ({type(exc).__name__}: {str(exc)[:300]}). Historical workbook mode remains available.")
+        st.warning(f"Government data could not be loaded. Exact diagnostic: {type(exc).__name__}: {str(exc)[:700]}. Historical workbook mode remains available.")
 elif not api_key:
     st.info("OGD API key not configured. AGMARKNET can be tested separately in the section above; no key is needed for that connector.")
 else:
