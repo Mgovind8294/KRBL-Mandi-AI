@@ -96,26 +96,23 @@ def fetch_enam_public_table():
             if failures and all("SSL" in failure for failure in failures):
                 return None, "Both official e-NAM hostnames failed TLS/SSL verification from the app server. Secure automatic fetching is unavailable in this runtime; certificate verification was not disabled. Use the official export until the hosting/network certificate chain is fixed."
             return None, "Could not connect to the official e-NAM trade page. " + "; ".join(failures)
-        # Try multiple installed HTML parsers. Streamlit Cloud may still be restarting
-        # after a requirements change, so the error message should identify the cause.
-        parser_errors = []
-        tables = None
-        for parser in ("lxml", "html5lib"):
-            try:
-                tables = pd.read_html(StringIO(response.text), flavor=parser)
-                break
-            except ImportError:
-                parser_errors.append(parser)
-        if tables is None:
-            return None, "HTML table parsers are not installed in the running app (tried lxml and html5lib). Wait for Streamlit Cloud to finish installing requirements and reboot the app."
-        if not tables:
-            return None, "The e-NAM page responded, but it did not expose a readable HTML table. It may load data through browser-side scripts."
+        # Parse HTML tables directly with BeautifulSoup first. This avoids pandas' optional
+        # read_html parser dependency and gives a clear message if the page has no data table.
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(response.text, "html.parser")
         frames = []
-        for table in tables:
-            if not table.empty:
-                frames.append(table)
+        for html_table in soup.find_all("table"):
+            rows = []
+            for tr in html_table.find_all("tr"):
+                cells = tr.find_all(["th", "td"])
+                if cells:
+                    rows.append([cell.get_text(" ", strip=True) for cell in cells])
+            if len(rows) >= 2:
+                width = max(len(row) for row in rows)
+                rows = [row + [""] * (width - len(row)) for row in rows]
+                frames.append(pd.DataFrame(rows[1:], columns=rows[0]))
         if not frames:
-            return None, "The e-NAM page did not return any trade rows."
+            return None, "The e-NAM page loaded, but it contains no server-rendered trade table. The page likely loads rows with browser-side scripts; a documented data endpoint or official export is required."
         raw = pd.concat(frames, ignore_index=True, sort=False)
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = [
