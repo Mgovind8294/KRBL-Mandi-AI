@@ -24,3 +24,16 @@ Punjab, Haryana, Uttar Pradesh, Rajasthan, Uttarakhand and Delhi.
 - The government price resource may not include arrival quantity. Arrival forecasting therefore requires dated arrival quantities in the uploaded workbook.
 - Forecasts are estimates, not official government predictions or guaranteed prices.
 - The dashboard does not replace failed API responses with fabricated data.
+
+## Scheduled government-data snapshot (fallback for Streamlit Cloud timeouts)
+
+A GitHub Actions workflow now runs daily and can also be started manually. It fetches the same official OGD resource outside Streamlit Cloud and commits the latest successful snapshot to `data/ogd_latest.csv`. When the dashboard's direct API request times out, the app can display this saved snapshot instead. The snapshot is not guaranteed to refresh until the workflow succeeds.
+
+One-time setup:
+1. Open the repository on GitHub → **Settings → Secrets and variables → Actions → New repository secret**.
+2. Add a secret named `DATA_GOV_IN_API_KEY` and paste your newly generated data.gov.in API key as its value. This is separate from Streamlit Community Cloud Secrets.
+3. Open **Actions → Refresh official mandi data → Run workflow** to test it manually.
+4. Open the workflow run and confirm that the fetch step succeeds and the commit step updates `data/ogd_latest.csv`.
+5. After a successful run, refresh the Streamlit dashboard. Check the latest observation date and source label; cached records are a snapshot, not live data.
+
+If the workflow fails with connection timeout too, the hosting environment is not the only likely cause; check the official API's availability and response. Do not paste API keys into issues, chat, logs, or screenshots.
