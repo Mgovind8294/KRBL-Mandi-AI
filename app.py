@@ -96,7 +96,18 @@ def fetch_enam_public_table():
             if failures and all("SSL" in failure for failure in failures):
                 return None, "Both official e-NAM hostnames failed TLS/SSL verification from the app server. Secure automatic fetching is unavailable in this runtime; certificate verification was not disabled. Use the official export until the hosting/network certificate chain is fixed."
             return None, "Could not connect to the official e-NAM trade page. " + "; ".join(failures)
-        tables = pd.read_html(StringIO(response.text))
+        # Try multiple installed HTML parsers. Streamlit Cloud may still be restarting
+        # after a requirements change, so the error message should identify the cause.
+        parser_errors = []
+        tables = None
+        for parser in ("lxml", "html5lib"):
+            try:
+                tables = pd.read_html(StringIO(response.text), flavor=parser)
+                break
+            except ImportError:
+                parser_errors.append(parser)
+        if tables is None:
+            return None, "HTML table parsers are not installed in the running app (tried lxml and html5lib). Wait for Streamlit Cloud to finish installing requirements and reboot the app."
         if not tables:
             return None, "The e-NAM page responded, but it did not expose a readable HTML table. It may load data through browser-side scripts."
         frames = []
@@ -147,7 +158,7 @@ def fetch_enam_public_table():
             return None, "e-NAM TLS/SSL verification failed. The app cannot establish a secure connection; certificate verification remains enabled."
         return None, f"e-NAM public page request failed ({type(exc).__name__}). The page may be temporarily unavailable or block automated requests."
     except ImportError as exc:
-        return None, f"HTML table parser dependency is missing ({type(exc).__name__}). The app needs lxml installed from requirements.txt; after deployment restarts, try again."
+        return None, f"HTML table parser dependency is missing ({type(exc).__name__}). Check that Streamlit Cloud installed lxml/html5lib from requirements.txt and completed its reboot."
     except ValueError:
         return None, "e-NAM did not expose a parseable public HTML table. A documented data endpoint or official export is needed for reliable automation."
     except Exception as exc:
