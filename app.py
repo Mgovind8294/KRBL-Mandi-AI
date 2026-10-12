@@ -1,10 +1,6 @@
-import os
 import pandas as pd
 import plotly.express as px
-import requests
 import streamlit as st
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 st.set_page_config(page_title="KRBL Mandi AI | Paddy Intelligence", page_icon="🌾", layout="wide")
 ENAM_DASHBOARD = "https://enam.gov.in/dashboard"
@@ -18,12 +14,6 @@ st.markdown("""
 [data-testid="stMetric"] {background: #f7f9fc; border: 1px solid #e5eaf2; padding: 14px; border-radius: 12px;}
 </style>
 """, unsafe_allow_html=True)
-
-def get_api_key():
-    try:
-        return str(st.secrets.get("DATA_GOV_IN_API_KEY", "") or os.getenv("DATA_GOV_IN_API_KEY", "")).strip()
-    except Exception:
-        return os.getenv("DATA_GOV_IN_API_KEY", "").strip()
 
 def standardize_columns(frame):
     df = frame.copy()
@@ -64,73 +54,6 @@ def standardize_columns(frame):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace(",", "", regex=False), errors="coerce")
     return df
-
-def api_session():
-    session = requests.Session()
-    retry = Retry(total=2, connect=2, read=1, backoff_factor=0.8,
-                  status_forcelist=[429, 500, 502, 503, 504],
-                  allowed_methods=["GET"], raise_on_status=False)
-    session.mount("https://", HTTPAdapter(max_retries=retry))
-    return session
-
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_data(api_key, limit=1000):
-    """Fetch multiple pages from the official OGD resource, then retain the six configured states."""
-    session = api_session()
-    page_size = max(100, min(1000, int(limit)))
-    params = {"api-key": api_key, "format": "json", "limit": page_size, "offset": 0}
-    state_aliases = {
-        "punjab": "Punjab", "haryana": "Haryana",
-        "uttar pradesh": "Uttar Pradesh", "uttarakhand": "Uttarakhand",
-        "rajasthan": "Rajasthan", "delhi": "Delhi",
-        "nct of delhi": "Delhi", "national capital territory of delhi": "Delhi",
-    }
-    all_rows, total = [], None
-    # OGD can report a large nationwide total. Cap requests for predictable app response time;
-    # the sidebar will report whether the full reported result set was downloaded.
-    max_pages = 30
-    try:
-        for page in range(max_pages):
-            params["offset"] = page * page_size
-            response = session.get(API_URL, params=params, timeout=(10, 35))
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise ValueError("Unexpected OGD response format")
-            if payload.get("error") or (payload.get("message") and not payload.get("records")):
-                raise RuntimeError(str(payload.get("error") or payload.get("message"))[:200])
-            rows = payload.get("records") or []
-            if not rows:
-                break
-            all_rows.extend(rows)
-            if total is None:
-                try:
-                    total = int(payload.get("total"))
-                except (TypeError, ValueError):
-                    total = None
-            print(f"OGD page {page + 1}: {len(rows)} rows; downloaded {len(all_rows)}")
-            if len(rows) < page_size or (total is not None and len(all_rows) >= total):
-                break
-        if not all_rows:
-            raise RuntimeError("OGD returned zero records.")
-        result = standardize_columns(pd.DataFrame(all_rows)).drop_duplicates().reset_index(drop=True)
-        if "State" not in result.columns:
-            raise RuntimeError("OGD response did not include a recognizable State column.")
-        result["State"] = result["State"].astype(str).str.strip().replace(state_aliases)
-        result = result[result["State"].astype(str).str.lower().isin(state_aliases)].copy()
-        if result.empty:
-            raise RuntimeError("OGD pages loaded, but none of the records matched the six configured states.")
-        result.attrs["api_rows_fetched"] = len(result)
-        result.attrs["api_total_records"] = total if total is not None else "not supplied"
-        result.attrs["api_pages_fetched"] = page + 1
-        result.attrs["api_rows_downloaded"] = len(all_rows)
-        result.attrs["api_complete"] = (total is not None and len(all_rows) >= total)
-        result.attrs["state_errors"] = []
-        result.attrs["fetch_scope"] = "Official OGD pages filtered to Punjab, Haryana, Uttar Pradesh, Rajasthan, Uttarakhand and Delhi."
-        return result
-    except Exception as exc:
-        detail = str(exc).replace(api_key, "[REDACTED_API_KEY]") if api_key else str(exc)
-        raise RuntimeError(f"Official OGD request failed: {type(exc).__name__}: {detail[:300]}") from exc
 
 def read_uploaded_file(upload):
     if upload.name.lower().endswith((".xlsx", ".xls")):
