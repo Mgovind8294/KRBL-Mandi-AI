@@ -61,6 +61,48 @@ def read_uploaded_file(upload):
         return pd.read_excel(book, sheet_name=sheet)
     return pd.read_csv(upload)
 
+
+def fetch_enam_public_table():
+    """Attempt to read a public, server-rendered e-NAM trade table without credentials.
+    Returns (dataframe, message). It never fabricates data or bypasses login/access controls.
+    """
+    from io import StringIO
+    import requests
+
+    url = "https://www.enam.gov.in/web/dashboard/trade-data"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; KRBLMandiAI/1.0)",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=(8, 20))
+        response.raise_for_status()
+        tables = pd.read_html(StringIO(response.text))
+        if not tables:
+            return None, "The e-NAM page responded, but it did not expose a readable HTML table. It may load data through browser-side scripts."
+        frames = []
+        for table in tables:
+            if not table.empty:
+                frames.append(table)
+        if not frames:
+            return None, "The e-NAM page did not return any trade rows."
+        raw = pd.concat(frames, ignore_index=True, sort=False)
+        data = standardize_columns(raw)
+        date_ok = "Arrival Date" in data.columns and data["Arrival Date"].notna().any()
+        price_ok = "Modal Price (₹/qtl)" in data.columns and data["Modal Price (₹/qtl)"].notna().any()
+        if not date_ok or not price_ok:
+            return None, "The public page returned HTML, but no dated price records could be mapped safely. No prices were loaded."
+        data = data.drop_duplicates().reset_index(drop=True)
+        data["Data Source"] = "e-NAM public page (automatically fetched)"
+        return data, f"Read {len(data):,} rows from the public e-NAM page."
+    except requests.RequestException as exc:
+        return None, f"e-NAM public page request failed ({type(exc).__name__}). The page may be temporarily unavailable or block automated requests."
+    except ValueError:
+        return None, "e-NAM did not expose a parseable public HTML table. A documented data endpoint or official export is needed for reliable automation."
+    except Exception as exc:
+        return None, f"Could not safely parse the public e-NAM page ({type(exc).__name__})."
+
+
 def build_forecast(history, target_col, horizon):
     """Train a lag-feature model on actual dated observations; interpolate only short gaps."""
     from sklearn.ensemble import RandomForestRegressor
@@ -141,13 +183,24 @@ with st.sidebar:
     st.caption("The app currently imports official reports uploaded by the user; an automated e-NAM API connection has not been verified. No synthetic mandi prices are shown.")
 
 st.subheader("Official e-NAM data")
-st.write("Download or export the relevant trade/price report from the official e-NAM dashboard, then upload it here. Only the uploaded report is treated as e-NAM data; if e-NAM does not provide Narela / Paddy 1509 records, the dashboard will not invent them.")
+st.write("First try the public e-NAM trade page automatically. If the portal blocks automated access or only renders data in the browser, the app will explain that and keep the verified-report upload option. No prices are invented.")
+if st.button("Fetch e-NAM public data now", type="primary", use_container_width=False):
+    with st.spinner("Connecting to the official e-NAM trade page…"):
+        live_enam, live_message = fetch_enam_public_table()
+    st.session_state["enam_public_data"] = live_enam
+    st.session_state["enam_public_message"] = live_message
+    st.session_state["enam_public_checked"] = True
+if st.session_state.get("enam_public_checked"):
+    if st.session_state.get("enam_public_data") is not None:
+        st.success(st.session_state.get("enam_public_message", "e-NAM data fetched."))
+    else:
+        st.warning(st.session_state.get("enam_public_message", "No verified public data was returned."))
 enam_upload = st.file_uploader(
     "Upload official e-NAM report (CSV / Excel)",
     type=["csv", "xlsx", "xls"],
     key="enam_report_upload",
 )
-enam_df = None
+enam_df = st.session_state.get("enam_public_data")
 if enam_upload is not None:
     try:
         enam_df = standardize_columns(read_uploaded_file(enam_upload))
@@ -241,7 +294,7 @@ df = None
 data_source = None
 if enam_df is not None:
     df = enam_df.copy()
-    data_source = "e-NAM official report (uploaded)"
+    data_source = str(df["Data Source"].iloc[0]) if "Data Source" in df.columns and len(df) else "e-NAM public data"
 elif history_df is not None:
     df = history_df.copy()
     data_source = "Historical Excel (user-uploaded; not government-live)"
