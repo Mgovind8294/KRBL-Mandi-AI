@@ -287,8 +287,9 @@ with st.sidebar:
                             help="Keep the key private. For deployment use Streamlit App settings → Secrets.")
     limit = st.select_slider("Recent government records to fetch", options=[100, 250, 500, 1000], value=500,
                              help="Fetched in pages of 100, newest arrival dates requested first where the API supports sorting.")
-    if st.button("Refresh government data", use_container_width=True):
+    if st.button("Load / refresh OGD data", use_container_width=True):
         fetch_data.clear()
+        st.session_state["run_ogd_fetch"] = True
         st.rerun()
     st.divider()
     st.caption("Government source: OGD / AGMARKNET")
@@ -321,7 +322,7 @@ with st.expander("AGMARKNET live connection (official price & arrival source)", 
         st.warning("Some state/month queries were empty or failed: " + "; ".join(st.session_state["agmarknet_live_errors"][:8]))
 if st.session_state.get("agmarknet_live_rows") is not None:
     agmarknet_df = st.session_state["agmarknet_live_rows"].copy()
-if api_key:
+if api_key and st.session_state.get("run_ogd_fetch", False):
     try:
         with st.spinner("Connecting to Government of India mandi data for six states…"):
             live_df = fetch_data(api_key, limit)
@@ -341,8 +342,10 @@ if api_key:
         st.warning(f"Government API returned HTTP {status or 'error'}. Check the API key, resource access and portal status.")
     except Exception as exc:
         st.warning(f"Government data could not be loaded ({type(exc).__name__}). Historical workbook mode remains available.")
+elif not api_key:
+    st.info("OGD API key not configured. AGMARKNET can be tested separately in the section above; no key is needed for that connector.")
 else:
-    st.info("Government API key not configured. Configure DATA_GOV_IN_API_KEY in Streamlit Secrets to enable online data.")
+    st.info("OGD requests are paused to keep the dashboard responsive. Use 'Load / refresh OGD data' in the sidebar only if you want to test the data.gov.in connector.")
 
 st.subheader("Historical workbook / offline fallback")
 st.write("Upload your existing Paddy Price Prediction Excel. Its historical records are kept separate from official government observations, and the original workbook is not modified.")
