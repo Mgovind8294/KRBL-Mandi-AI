@@ -232,7 +232,7 @@ def fetch_data(api_key, limit=500):
     for state in states:
         params = {
             "api-key": api_key, "format": "json", "limit": per_state, "offset": 0,
-            "filters[state.keyword]": state, "filters[commodity]": "Paddy(Dhan)(Common)"
+            "filters[state]": state, "sort[arrival_date]": "desc"
         }
         try:
             response = session.get(API_URL, params=params, timeout=(8, 25))
@@ -342,8 +342,8 @@ api_errors = []
 agmarknet_df = None
 agmarknet_errors = []
 with st.expander("AGMARKNET live connection (official price & arrival source)", expanded=not bool(get_api_key())):
-    st.write("This connector uses the public AGMARKNET 2.0 API behind the Daily Price and Arrival Report. No data.gov.in API key is needed for this connection.")
-    if st.button("Test / load AGMARKNET live data", key="load_agmarknet", use_container_width=True):
+    st.write("The direct AGMARKNET report endpoint is CAPTCHA-protected and cannot be used for unattended loading. Use the official data.gov.in OGD connector instead.")
+    if st.button("Test AGMARKNET connection (CAPTCHA protected)", key="load_agmarknet", use_container_width=True):
         fetch_agmarknet_data.clear()
         try:
             with st.spinner("Connecting to official AGMARKNET and loading recent monthly reports…"):
@@ -353,7 +353,7 @@ with st.expander("AGMARKNET live connection (official price & arrival source)", 
             st.success(f"AGMARKNET returned {len(agmarknet_df):,} rows.")
         except Exception as exc:
             st.session_state["agmarknet_live_error"] = f"{type(exc).__name__}: {str(exc)[:350]}"
-            st.error("AGMARKNET data could not be loaded. Details: " + st.session_state["agmarknet_live_error"])
+            st.error("Direct AGMARKNET report access is blocked by CAPTCHA. Use the official OGD connector instead. Details: " + st.session_state["agmarknet_live_error"])
     if st.session_state.get("agmarknet_live_error"):
         st.caption("Last connection result: " + st.session_state["agmarknet_live_error"])
     if st.session_state.get("agmarknet_live_errors"):
@@ -385,7 +385,7 @@ if api_key and st.session_state.get("run_ogd_fetch", False):
 elif not api_key:
     st.info("OGD API key not configured. AGMARKNET can be tested separately in the section above; no key is needed for that connector.")
 else:
-    st.info("OGD requests are paused to keep the dashboard responsive. Use 'Load / refresh OGD data' in the sidebar only if you want to test the data.gov.in connector.")
+    st.info("OGD is the recommended official data source. Click 'Load / refresh OGD data' in the sidebar to fetch current published records.")
 
 st.subheader("Historical workbook / offline fallback")
 st.write("Upload your existing Paddy Price Prediction Excel. Its historical records are kept separate from official government observations, and the original workbook is not modified.")
