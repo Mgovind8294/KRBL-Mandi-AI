@@ -105,24 +105,17 @@ def fetch_agmarknet_data():
             "commodity",
         )
         if commodity_id is None:
-            commodity_candidates = []
-            for item in _walk_dicts(metadata):
-                keys = {str(k).lower() for k in item.keys()}
-                if any("commod" in k or "comm_" in k for k in keys):
-                    commodity_candidates.append({str(k): str(v)[:80] for k, v in item.items() if not isinstance(v, (dict, list))})
-                if len(commodity_candidates) >= 8:
-                    break
-            # Include only structural keys and a short, non-sensitive response preview so
-            # the actual upstream schema can be diagnosed without exposing credentials.
-            top_keys = list(metadata.keys())[:20] if isinstance(metadata, dict) else ["<top-level list>"]
+            # The AGMARKNET filter payload uses short keys such as cmdt_data.
+            # Include a small sample of that exact list in diagnostics to expose the real schema.
             data_block = metadata.get("data") if isinstance(metadata, dict) else None
+            cmdt_data = data_block.get("cmdt_data") if isinstance(data_block, dict) else None
+            cmdt_sample = repr(cmdt_data[:5] if isinstance(cmdt_data, list) else cmdt_data)[:1400]
+            top_keys = list(metadata.keys())[:20] if isinstance(metadata, dict) else ["<top-level list>"]
             data_keys = list(data_block.keys())[:30] if isinstance(data_block, dict) else []
-            sample = repr(commodity_candidates[:5])[:500]
-            preview = repr(metadata)[:900]
             raise RuntimeError(
                 "Paddy commodity ID not found in AGMARKNET filters. "
                 f"Top-level keys: {top_keys}; data keys: {data_keys}; "
-                f"commodity sample: {sample}; response preview: {preview}"
+                f"cmdt_data sample: {cmdt_sample}"
             )
         for year, month in months:
             try:
