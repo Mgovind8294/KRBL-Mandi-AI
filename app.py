@@ -130,16 +130,15 @@ def build_forecast(history, target_col, horizon):
     return pd.DataFrame(forecast_rows), float(mae), None
 
 st.title("🌾 KRBL Mandi AI — India Paddy Price Intelligence")
-st.caption("Official e-NAM report import + user-provided history. No demo records. KPIs use the latest available observation date in the selected filters.")
+st.caption("Mandi price intelligence, arrival trends, and ML forecasts. Only verified uploaded records are displayed; no sample prices are generated.")
 
 with st.sidebar:
     st.header("Data source")
-    st.markdown("[Open official e-NAM dashboard](https://enam.gov.in/dashboard)")
-    st.markdown("[Open Delhi Agricultural Marketing Board rates](https://delagrimarket.nic.in/)")
-    st.caption("AGMARKNET / data.gov.in feed has been removed from this app. e-NAM data is loaded only from an official report you upload; the app does not pretend the website is an unrestricted API.")
-
-st.title("🌾 KRBL Mandi AI — India Paddy Price Intelligence")
-st.caption("Official e-NAM report import + user-provided history. No demo records. KPIs use the latest available observation date in the selected filters.")
+    st.markdown("[e-NAM — Trade Details](https://www.enam.gov.in/web/dashboard/trade-data)")
+    st.markdown("[e-NAM — Historical Trade Data](https://www.enam.gov.in/web/dashboard/Historical)")
+    st.markdown("[e-NAM — Live Price Information](https://www.enam.gov.in/web/dashboard/live_price)")
+    st.markdown("[Delhi Agricultural Marketing Board](https://delagrimarket.nic.in/)")
+    st.caption("The app currently imports official reports uploaded by the user; an automated e-NAM API connection has not been verified. No synthetic mandi prices are shown.")
 
 st.subheader("Official e-NAM data")
 st.write("Download or export the relevant trade/price report from the official e-NAM dashboard, then upload it here. Only the uploaded report is treated as e-NAM data; if e-NAM does not provide Narela / Paddy 1509 records, the dashboard will not invent them.")
