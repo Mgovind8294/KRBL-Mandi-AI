@@ -80,7 +80,7 @@ def fetch_data(api_key, limit=500):
     for state in states:
         params = {
             "api-key": api_key, "format": "json", "limit": per_state, "offset": 0,
-            "filters[state.keyword]": state, "filters[commodity]": "Paddy"
+            "filters[state.keyword]": state, "filters[commodity]": "Paddy(Dhan)(Common)"
         }
         try:
             response = session.get(API_URL, params=params, timeout=(8, 25))
