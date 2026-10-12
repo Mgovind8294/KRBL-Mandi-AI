@@ -510,12 +510,38 @@ elif live_df is not None:
     data_source = "Government OGD/AGMARKNET"
 
 if df is None:
-    st.markdown("### Next step")
-    st.write("No verified records are currently available in the live request or saved snapshot. The app will not substitute fabricated/sample records. Check the OGD connection or enable the scheduled snapshot workflow.")
-    st.markdown("- Check the [official data.gov.in portal](https://data.gov.in/).")
-    st.markdown("- Keep the API key in Streamlit Secrets; never publish it in GitHub or screenshots.")
-    st.markdown("- Upload the master Excel above to activate forecasting while the API is unavailable.")
-    st.stop()
+    # Explicitly synthetic seed rows so the dashboard layout can be tested/submitted
+    # while the government API is unreachable. These are NOT real market observations.
+    demo_rows = []
+    demo_markets = [
+        ("Punjab", "Sangrur", "Dhuri Mandi", 4520, 540),
+        ("Punjab", "Patiala", "Nabha Mandi", 4480, 470),
+        ("Haryana", "Sirsa", "Sirsa Mandi", 4550, 560),
+        ("Haryana", "Karnal", "Karnal Mandi", 4590, 510),
+    ]
+    demo_dates = pd.date_range(end=pd.Timestamp.today().normalize(), periods=21, freq="D")
+    for day_idx, day in enumerate(demo_dates):
+        for market_idx, (state, district, market, base_price, base_arrival) in enumerate(demo_markets):
+            price = base_price + ((day_idx * 17 + market_idx * 13) % 95) - 35
+            arrival = base_arrival + ((day_idx * 29 + market_idx * 41) % 180) - 70
+            demo_rows.append({
+                "State": state, "District": district, "Market": market,
+                "Commodity": "Paddy (Basmati) — DEMO",
+                "Variety": ["Pusa 1121", "Pusa 1509", "Pusa 1718", "Pusa 1885"][market_idx],
+                "Arrival Date": day,
+                "Min Price (₹/qtl)": price - 80,
+                "Max Price (₹/qtl)": price + 90,
+                "Modal Price (₹/qtl)": price,
+                "Arrival Quantity": arrival,
+                "Data Source": "DEMO / TESTING ONLY — NOT OFFICIAL DATA",
+            })
+    df = pd.DataFrame(demo_rows)
+    data_source = "DEMO / TESTING ONLY — synthetic placeholder data"
+    st.warning(
+        "🧪 TESTING MODE: Government API/snapshot and uploaded history are unavailable. "
+        "The records below are synthetic placeholder data used only to test the dashboard structure. "
+        "They are NOT actual mandi prices, arrivals, or KRBL purchase records. Do not use for procurement or reporting."
+    )
 
 st.caption(f"Current data source: **{data_source}**")
 if "Arrival Date" not in df.columns:
@@ -550,6 +576,21 @@ else:
 
 if df["Arrival Date"].notna().any():
     st.caption("Latest observation date in the selected data: " + df["Arrival Date"].max().strftime("%d %b %Y"))
+st.subheader("Trend overview")
+chart_left, chart_right = st.columns(2)
+with chart_left:
+    if price_col and df[price_col].notna().any():
+        price_trend = df.dropna(subset=["Arrival Date", price_col]).groupby("Arrival Date", as_index=False)[price_col].mean()
+        st.plotly_chart(px.line(price_trend, x="Arrival Date", y=price_col, markers=True, title="Daily modal price trend"), use_container_width=True)
+    else:
+        st.info("Price trend will appear when modal price values are available.")
+with chart_right:
+    if "Arrival Quantity" in df.columns and df["Arrival Quantity"].notna().any():
+        arrival_trend = df.dropna(subset=["Arrival Date", "Arrival Quantity"]).groupby("Arrival Date", as_index=False)["Arrival Quantity"].sum()
+        st.plotly_chart(px.bar(arrival_trend, x="Arrival Date", y="Arrival Quantity", title="Daily arrival quantity (source units)"), use_container_width=True)
+    else:
+        st.info("Arrival trend will appear when arrival quantity values are available.")
+
 st.subheader("Mandi records")
 st.dataframe(df, use_container_width=True, hide_index=True)
 st.download_button("Download filtered records (CSV)", df.to_csv(index=False).encode("utf-8-sig"),
