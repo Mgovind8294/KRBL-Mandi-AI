@@ -254,6 +254,7 @@ def fetch_data(api_key, limit=500):
             detail = str(exc)[:180]
             if response is not None and getattr(response, "text", ""):
                 detail += " | " + response.text[:180]
+            detail = detail.replace(api_key, "[REDACTED_API_KEY]") if api_key else detail
             errors.append(f"{state}: HTTP {status}: {detail}" if status else f"{state}: {type(exc).__name__}: {detail}")
     if not all_rows:
         raise RuntimeError("Government API returned no records for the six selected states. " + "; ".join(errors))
@@ -386,7 +387,13 @@ if api_key and st.session_state.get("run_ogd_fetch", False):
         status = getattr(exc.response, "status_code", None)
         st.warning(f"Government API returned HTTP {status or 'error'}. Check the API key, resource access and portal status.")
     except Exception as exc:
-        st.warning(f"Government data could not be loaded. Exact diagnostic: {type(exc).__name__}: {str(exc)[:700]}. Historical workbook mode remains available.")
+        diagnostic = str(exc).replace(api_key, "[REDACTED_API_KEY]") if api_key else str(exc)
+        if isinstance(exc, RuntimeError) and "ConnectTimeout" in diagnostic or "HTTPSConnectionPool" in diagnostic:
+            st.warning("Government API connection timed out from the hosting environment. This is a network/API reachability issue, not proof that the API key is invalid. Historical workbook mode remains available.")
+            with st.expander("Connection diagnostics"):
+                st.code(f"{type(exc).__name__}: {diagnostic[:700]}")
+        else:
+            st.warning(f"Government data could not be loaded. Exact diagnostic: {type(exc).__name__}: {diagnostic[:700]}. Historical workbook mode remains available.")
 elif not api_key:
     st.info("OGD API key not configured. AGMARKNET can be tested separately in the section above; no key is needed for that connector.")
 else:
