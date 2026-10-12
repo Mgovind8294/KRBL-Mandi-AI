@@ -209,7 +209,7 @@ def build_forecast(history, target_col, horizon):
     return pd.DataFrame(forecast_rows), float(mae), None
 
 st.title("🌾 KRBL Mandi AI — India Paddy Price Intelligence")
-st.caption("Government mandi observations + transparent historical forecasting. Government price data is generally updated by the publisher, not tick-by-tick real time; forecasts are estimates.")
+st.caption("Government mandi observations + transparent historical forecasting. Government price data is updated by the publisher, not tick-by-tick real time; forecasts are estimates.")
 
 with st.sidebar:
     st.header("Data configuration")
