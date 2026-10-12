@@ -18,6 +18,12 @@ AGMARKNET_STATES = ["Punjab", "Haryana", "Uttar Pradesh", "Rajasthan", "Uttarakh
 
 def agmarknet_session():
     session = requests.Session()
+    retry = Retry(
+        total=2, connect=2, read=1, backoff_factor=1.0,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"], raise_on_status=False,
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retry))
     session.headers.update({
         "Accept": "application/json, text/plain, */*",
         "Origin": "https://agmarknet.gov.in",
@@ -78,7 +84,7 @@ def fetch_agmarknet_data():
     """Fetch official AGMARKNET price/arrival observations for the six requested states."""
     session = agmarknet_session()
     base = AGMARKNET_BASE
-    filters_response = session.get(f"{base}/daily-price-arrival/filters", timeout=(8, 25))
+    filters_response = session.get(f"{base}/daily-price-arrival/filters", timeout=(12, 45))
     filters_response.raise_for_status()
     metadata = filters_response.json()
     if not isinstance(metadata, (dict, list)):
@@ -114,7 +120,7 @@ def fetch_agmarknet_data():
                     f"{base}/prices-and-arrivals/date-wise/specific-commodity",
                     params={"year": year, "month": month, "stateId": state_id, "commodityId": commodity_id,
                             "includeExcel": "false"},
-                    timeout=(8, 30),
+                    timeout=(12, 45),
                 )
                 resp.raise_for_status()
                 rows = _extract_record_list(resp.json())
