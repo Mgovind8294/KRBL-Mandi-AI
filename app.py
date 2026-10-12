@@ -146,6 +146,8 @@ def fetch_enam_public_table():
         if isinstance(exc, requests.exceptions.SSLError):
             return None, "e-NAM TLS/SSL verification failed. The app cannot establish a secure connection; certificate verification remains enabled."
         return None, f"e-NAM public page request failed ({type(exc).__name__}). The page may be temporarily unavailable or block automated requests."
+    except ImportError as exc:
+        return None, f"HTML table parser dependency is missing ({type(exc).__name__}). The app needs lxml installed from requirements.txt; after deployment restarts, try again."
     except ValueError:
         return None, "e-NAM did not expose a parseable public HTML table. A documented data endpoint or official export is needed for reliable automation."
     except Exception as exc:
