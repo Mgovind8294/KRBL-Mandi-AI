@@ -67,9 +67,18 @@ try:
     with st.spinner("Fetching latest available government records…"):
         df = fetch_data(api_key, limit)
     st.success(f"Government API connected — {len(df):,} records fetched. Source updates are controlled by the government publisher.")
+except requests.exceptions.Timeout:
+    st.error("Government API request timed out. The data.gov.in API may be slow or temporarily unavailable.")
+    st.info("Try Refresh government data again later. Your API key is hidden from this error message. No sample prices are substituted.")
+    st.stop()
+except requests.exceptions.ConnectionError:
+    st.error("Could not connect to api.data.gov.in. The service may be temporarily unavailable, or the hosting environment may be unable to reach it.")
+    st.info("Please retry later and check the official data.gov.in portal. Your API key is hidden from this error message. No sample prices are substituted.")
+    st.stop()
 except Exception as exc:
-    st.error(f"Government API could not be verified: {exc}")
-    st.info("Check the API key, resource access, internet availability and data.gov.in service status. No sample prices are substituted.")
+    # Do not render raw request exceptions: they may include the API URL and key.
+    st.error(f"Government API request failed ({type(exc).__name__}).")
+    st.info("Check the API key and resource access, then retry later. Sensitive request details are hidden. No sample prices are substituted.")
     st.stop()
 
 if "Commodity" in df.columns:
