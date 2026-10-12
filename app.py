@@ -87,6 +87,34 @@ def fetch_enam_public_table():
         if not frames:
             return None, "The e-NAM page did not return any trade rows."
         raw = pd.concat(frames, ignore_index=True, sort=False)
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = [
+                " ".join(str(part).strip() for part in col if str(part).strip() and not str(part).lower().startswith("unnamed"))
+                for col in raw.columns
+            ]
+        else:
+            raw.columns = [str(col).strip() for col in raw.columns]
+        # e-NAM's visible table can group Min/Modal/Max Price beneath a parent heading.
+        normalized = {}
+        for col in raw.columns:
+            key = " ".join(str(col).lower().replace("_", " ").replace("-", " ").split())
+            if "modal price" in key:
+                normalized[col] = "Modal Price (₹/qtl)"
+            elif "min price" in key:
+                normalized[col] = "Min Price (₹/qtl)"
+            elif "max price" in key:
+                normalized[col] = "Max Price (₹/qtl)"
+            elif "commodity arrivals" in key or "arrival quantity" in key:
+                normalized[col] = "Arrival Quantity"
+            elif key == "date" or key.endswith(" date"):
+                normalized[col] = "Arrival Date"
+            elif key in ("state", "state name"):
+                normalized[col] = "State"
+            elif "apmc" in key:
+                normalized[col] = "Market"
+            elif "commodity" in key:
+                normalized[col] = "Commodity"
+        raw.rename(columns=normalized, inplace=True)
         data = standardize_columns(raw)
         date_ok = "Arrival Date" in data.columns and data["Arrival Date"].notna().any()
         price_ok = "Modal Price (₹/qtl)" in data.columns and data["Modal Price (₹/qtl)"].notna().any()
