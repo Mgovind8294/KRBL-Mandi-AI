@@ -69,14 +69,33 @@ def fetch_enam_public_table():
     from io import StringIO
     import requests
 
-    url = "https://www.enam.gov.in/web/dashboard/trade-data"
+    # Try both official e-NAM hostnames. Keep TLS certificate verification enabled:
+    # disabling verification would expose the app to man-in-the-middle attacks.
+    urls = [
+        "https://www.enam.gov.in/web/dashboard/trade-data",
+        "https://enam.gov.in/web/dashboard/trade-data",
+    ]
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; KRBLMandiAI/1.0)",
         "Accept": "text/html,application/xhtml+xml",
     }
     try:
-        response = requests.get(url, headers=headers, timeout=(8, 20))
-        response.raise_for_status()
+        response = None
+        failures = []
+        for url in urls:
+            try:
+                candidate = requests.get(url, headers=headers, timeout=(8, 20))
+                candidate.raise_for_status()
+                response = candidate
+                break
+            except requests.exceptions.SSLError:
+                failures.append(f"{url}: SSL certificate/handshake error")
+            except requests.RequestException as exc:
+                failures.append(f"{url}: {type(exc).__name__}")
+        if response is None:
+            if failures and all("SSL" in failure for failure in failures):
+                return None, "Both official e-NAM hostnames failed TLS/SSL verification from the app server. Secure automatic fetching is unavailable in this runtime; certificate verification was not disabled. Use the official export until the hosting/network certificate chain is fixed."
+            return None, "Could not connect to the official e-NAM trade page. " + "; ".join(failures)
         tables = pd.read_html(StringIO(response.text))
         if not tables:
             return None, "The e-NAM page responded, but it did not expose a readable HTML table. It may load data through browser-side scripts."
@@ -124,6 +143,8 @@ def fetch_enam_public_table():
         data["Data Source"] = "e-NAM public page (automatically fetched)"
         return data, f"Read {len(data):,} rows from the public e-NAM page."
     except requests.RequestException as exc:
+        if isinstance(exc, requests.exceptions.SSLError):
+            return None, "e-NAM TLS/SSL verification failed. The app cannot establish a secure connection; certificate verification remains enabled."
         return None, f"e-NAM public page request failed ({type(exc).__name__}). The page may be temporarily unavailable or block automated requests."
     except ValueError:
         return None, "e-NAM did not expose a parseable public HTML table. A documented data endpoint or official export is needed for reliable automation."
