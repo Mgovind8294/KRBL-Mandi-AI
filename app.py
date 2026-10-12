@@ -5,8 +5,6 @@ import streamlit as st
 st.set_page_config(page_title="KRBL Mandi AI | Paddy Intelligence", page_icon="🌾", layout="wide")
 ENAM_DASHBOARD = "https://enam.gov.in/dashboard"
 DELHI_MARKET_BOARD = "https://delagrimarket.nic.in/"
-RESOURCE_ID = "9ef84268-d588-465a-a308-a864a43d0070"
-API_URL = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
 
 st.markdown("""
 <style>
@@ -132,7 +130,7 @@ def build_forecast(history, target_col, horizon):
     return pd.DataFrame(forecast_rows), float(mae), None
 
 st.title("🌾 KRBL Mandi AI — India Paddy Price Intelligence")
-st.caption("Government OGD price feed + scheduled snapshot fallback + authorized KRBL purchase data. Only verified records are shown; forecasts are estimates.")
+st.caption("Official e-NAM report import + user-provided history. No demo records. KPIs use the latest available observation date in the selected filters.")
 
 with st.sidebar:
     st.header("Data source")
