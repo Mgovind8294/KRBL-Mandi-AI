@@ -150,8 +150,13 @@ def fetch_agmarknet_data():
                 if "State" not in frame.columns:
                     frame["State"] = state
                 frames.append(frame)
+            except requests.exceptions.HTTPError as exc:
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", "unknown")
+                body = (getattr(response, "text", "") or "").replace("\\n", " ").strip()[:140]
+                errors.append(f"{state} {year}-{month:02d}: HTTP {status} {body}")
             except Exception as exc:
-                errors.append(f"{state} {year}-{month:02d}: {type(exc).__name__}")
+                errors.append(f"{state} {year}-{month:02d}: {type(exc).__name__}: {str(exc)[:100]}")
     if not frames:
         raise RuntimeError("AGMARKNET API responded, but no usable price/arrival rows were returned. " + "; ".join(errors[:8]))
     result = pd.concat(frames, ignore_index=True, sort=False)
