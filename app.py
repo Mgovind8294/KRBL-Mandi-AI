@@ -71,45 +71,83 @@ def api_session():
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_data(api_key, limit=500):
-    """Fetch recent government records in pages; never substitute uploaded/sample data."""
+    """Fetch paginated OGD records, retrying without sorting if the API rejects sort syntax."""
     page_size = 100
-    all_rows = []
-    offset = 0
-    total_available = None
     session = api_session()
+    all_rows = []
+    total_available = None
+    sort_supported = True
+    offset = 0
+    max_records = max(1, int(limit))
 
-    while offset < int(limit):
-        this_limit = min(page_size, int(limit) - offset)
-        params = {
+    while offset < max_records:
+        this_limit = min(page_size, max_records - offset)
+        base_params = {
             "api-key": api_key,
             "format": "json",
             "limit": this_limit,
             "offset": offset,
-            "sort[arrival_date]": "desc",
         }
-        response = session.get(API_URL, params=params, timeout=(8, 20))
-        response.raise_for_status()
-        payload = response.json()
+        attempts = []
+        if sort_supported:
+            attempts.append({**base_params, "sort[arrival_date]": "desc"})
+        attempts.append(base_params)
+
+        response = None
+        last_error = None
+        for params in attempts:
+            try:
+                response = session.get(API_URL, params=params, timeout=(8, 20))
+                if response.status_code >= 400 and "sort[arrival_date]" in params:
+                    # Some OGD resources reject the sort parameter. Retry the same page without it.
+                    sort_supported = False
+                    continue
+                response.raise_for_status()
+                break
+            except requests.exceptions.RequestException as exc:
+                last_error = exc
+                if params == attempts[-1]:
+                    raise
+        if response is None:
+            if last_error:
+                raise last_error
+            raise ValueError("No response received from the government API.")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ValueError("Government API returned a non-JSON response.") from exc
+
         if not isinstance(payload, dict):
-            raise ValueError("Unexpected government API response format")
-        rows = payload.get("records", [])
+            raise ValueError("Unexpected government API response format.")
+        if payload.get("error") or payload.get("message") and not payload.get("records"):
+            message = str(payload.get("error") or payload.get("message"))
+            raise ValueError(f"Government API response: {message[:240]}")
+
         if total_available is None:
             try:
                 total_available = int(payload.get("total", 0))
             except (TypeError, ValueError):
                 total_available = None
+
+        rows = payload.get("records") or []
+        if not isinstance(rows, list):
+            raise ValueError("Government API 'records' field was not a list.")
         if not rows:
             break
+
         all_rows.extend(rows)
         offset += len(rows)
         if len(rows) < this_limit:
             break
 
     if not all_rows:
-        raise ValueError("The government API returned zero records. Check API access or retry later.")
+        raise ValueError("Government API returned zero records. Check API access or retry later.")
+
     result = standardize_columns(pd.DataFrame(all_rows))
     result.attrs["api_total_available"] = total_available
     result.attrs["api_rows_fetched"] = len(all_rows)
+    result.attrs["api_sort_supported"] = sort_supported
     return result
 
 def read_uploaded_file(upload):
@@ -196,6 +234,11 @@ if api_key:
         latest_api_date = df["Arrival Date"].max() if "Arrival Date" in df.columns else pd.NaT
         date_note = latest_api_date.strftime("%d %b %Y") if pd.notna(latest_api_date) else "date unavailable"
         st.success(f"Government API connected — {len(df):,} records fetched. Latest date in fetched records: {date_note}.")
+        if not df.attrs.get("api_sort_supported", True):
+            st.warning("The API did not accept the date-sort parameter. Records were fetched by API pagination order, so the sample may not contain the newest records.")
+        total_available = df.attrs.get("api_total_available")
+        if total_available:
+            st.caption(f"API reports approximately {total_available:,} total records for this resource; this dashboard fetched {len(df):,}.")
         st.caption("This is the latest date returned in the fetched sample, not a guarantee that every mandi has reported today.")
     except requests.exceptions.Timeout:
         st.warning("Government API timed out. This can happen during portal maintenance or network restrictions. Use the historical workbook option below; no sample data will be substituted.")
@@ -203,7 +246,7 @@ if api_key:
         st.warning("The hosting service could not connect to api.data.gov.in. This is a network/service issue unless a separate API response confirms a key problem. Use historical data below.")
     except requests.exceptions.HTTPError as exc:
         status = getattr(exc.response, "status_code", None)
-        st.warning(f"Government API returned HTTP {status or 'error'}. Verify key/resource access or retry when the portal is available.")
+        st.warning(f"Government API returned HTTP {status or 'error'}. Check that the API key is valid, the resource is accessible, and the portal is available. The API key is not shown here.")
     except Exception as exc:
         st.warning(f"Government data could not be loaded ({type(exc).__name__}). Sensitive request details are hidden.")
 else:
@@ -224,7 +267,7 @@ if uploaded is not None:
 
 if df is None:
     st.markdown("### Next step")
-    st.write("The public dashboard is running, but live records are currently unreachable. The official OGD portal itself reports maintenance affecting some functions.")
+    st.write("No data is currently loaded. Live records may be unreachable because of API access, hosting-network, or portal availability issues. The app will not substitute fabricated or sample records.")
     st.markdown("- Check the [official data.gov.in portal](https://data.gov.in/).")
     st.markdown("- Keep the API key in Streamlit Secrets; never publish it in GitHub or screenshots.")
     st.markdown("- Upload your historical Excel above to activate forecasting while the API is unavailable.")
@@ -270,6 +313,7 @@ st.download_button("Download filtered records (CSV)", df.to_csv(index=False).enc
 
 st.divider()
 st.subheader("Forecast centre")
+st.caption("Forecasts are calculated from the currently filtered rows and averaged by date. If multiple mandis or varieties are selected, this is an aggregate forecast—not a separate forecast for each mandi/variety.")
 horizon = st.slider("Forecast horizon (days)", 1, 7, 3)
 if price_col and df[price_col].notna().sum() >= 18:
     with st.spinner("Training price model and evaluating a time-ordered holdout…"):
@@ -308,3 +352,4 @@ else:
 
 st.divider()
 st.caption("Source: Government of India OGD / AGMARKNET when connected; otherwise the uploaded workbook. Forecasts are estimates. Check source dates, units, and holdout error before business use.")
+
