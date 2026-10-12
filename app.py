@@ -13,6 +13,119 @@ st.set_page_config(page_title="KRBL Mandi AI | Paddy Intelligence", page_icon="�
 RESOURCE_ID = "9ef84268-d588-465a-a308-a864a43d0070"
 API_URL = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
 
+AGMARKNET_BASE = "https://api.agmarknet.gov.in/v1"
+AGMARKNET_STATES = ["Punjab", "Haryana", "Uttar Pradesh", "Rajasthan", "Uttarakhand", "Delhi"]
+
+def agmarknet_session():
+    session = requests.Session()
+    session.headers.update({
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://agmarknet.gov.in",
+        "Referer": "https://agmarknet.gov.in/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    })
+    return session
+
+def _walk_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_dicts(child)
+
+def _find_metadata_id(payload, terms, kind):
+    """Find a matching state/commodity ID in the public filter metadata without hard-coded IDs."""
+    id_keys = {
+        "state": ("state_id", "stateId", "stateid", "id", "value"),
+        "commodity": ("commodity_id", "commodityId", "commodityid", "id", "value"),
+    }[kind]
+    name_keys = {
+        "state": ("state_name", "stateName", "statename", "name", "label", "state"),
+        "commodity": ("commodity_name", "commodityName", "commodityname", "name", "label", "commodity"),
+    }[kind]
+    candidates = []
+    for item in _walk_dicts(payload):
+        name = next((str(item[k]) for k in name_keys if k in item and item[k] is not None), "")
+        ident = next((item[k] for k in id_keys if k in item and item[k] is not None), None)
+        if not name or ident is None:
+            continue
+        normalized = " ".join(name.lower().replace("(dhan)", "").replace("(common)", "").replace("-", " ").split())
+        if any(term in normalized for term in terms):
+            candidates.append((name, ident))
+    # Prefer exact match before substring matches.
+    for name, ident in candidates:
+        norm = " ".join(name.lower().replace("(dhan)", "").replace("(common)", "").replace("-", " ").split())
+        if any(norm == term for term in terms):
+            return ident, name
+    return candidates[0][1:] if candidates else (None, None)
+
+def _extract_record_list(payload):
+    """Extract a list of row dictionaries from varying AGMARKNET JSON envelopes."""
+    if isinstance(payload, list) and payload and all(isinstance(x, dict) for x in payload):
+        return payload
+    best = []
+    for item in _walk_dicts(payload):
+        for value in item.values():
+            if isinstance(value, list) and value and all(isinstance(x, dict) for x in value):
+                if len(value) > len(best):
+                    best = value
+    return best
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_agmarknet_data():
+    """Fetch official AGMARKNET price/arrival observations for the six requested states."""
+    session = agmarknet_session()
+    base = AGMARKNET_BASE
+    filters_response = session.get(f"{base}/daily-price-arrival/filters", timeout=(8, 25))
+    filters_response.raise_for_status()
+    metadata = filters_response.json()
+    if not isinstance(metadata, (dict, list)):
+        raise ValueError("AGMARKNET filter endpoint returned an unexpected response.")
+    now = pd.Timestamp.now().normalize()
+    months = [(now.year, now.month), ((now - pd.offsets.MonthBegin(1)).year, (now - pd.offsets.MonthBegin(1)).month)]
+    frames, errors = [], []
+    for state in AGMARKNET_STATES:
+        state_id, state_label = _find_metadata_id(metadata, [state.lower()], "state")
+        if state_id is None:
+            errors.append(f"{state}: state ID not found in AGMARKNET filters")
+            continue
+        # Try common paddy labels; the exact label and ID are taken from official filter metadata.
+        commodity_id, commodity_label = _find_metadata_id(
+            metadata,
+            ["paddy dhan basmati", "basmati", "paddy dhan common", "paddy", "dhan"],
+            "commodity",
+        )
+        if commodity_id is None:
+            errors.append("Paddy commodity ID not found in AGMARKNET filters")
+            break
+        for year, month in months:
+            try:
+                resp = session.get(
+                    f"{base}/prices-and-arrivals/date-wise/specific-commodity",
+                    params={"year": year, "month": month, "stateId": state_id, "commodityId": commodity_id,
+                            "includeExcel": "false"},
+                    timeout=(8, 30),
+                )
+                resp.raise_for_status()
+                rows = _extract_record_list(resp.json())
+                if not rows:
+                    continue
+                frame = standardize_columns(pd.DataFrame(rows))
+                if "State" not in frame.columns:
+                    frame["State"] = state
+                frames.append(frame)
+            except Exception as exc:
+                errors.append(f"{state} {year}-{month:02d}: {type(exc).__name__}")
+    if not frames:
+        raise RuntimeError("AGMARKNET API responded, but no usable price/arrival rows were returned. " + "; ".join(errors[:8]))
+    result = pd.concat(frames, ignore_index=True, sort=False)
+    result.attrs["state_errors"] = errors
+    result.attrs["api_rows_fetched"] = len(result)
+    result.attrs["commodity_label"] = commodity_label
+    return result
+
 st.markdown("""
 <style>
 .block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
@@ -32,12 +145,12 @@ def standardize_columns(frame):
         "state": "State", "state name": "State", "district": "District", "district name": "District",
         "market": "Market", "mandi": "Market", "market name": "Market", "commodity": "Commodity",
         "crop": "Commodity", "variety": "Variety", "grade": "Grade", "arrival_date": "Arrival Date",
-        "arrival date": "Arrival Date", "date": "Arrival Date", "price date": "Arrival Date",
+        "arrival date": "Arrival Date", "date": "Arrival Date", "price date": "Arrival Date", "reported date": "Arrival Date",
         "min_price": "Min Price (₹/qtl)", "min price": "Min Price (₹/qtl)",
         "max_price": "Max Price (₹/qtl)", "max price": "Max Price (₹/qtl)",
         "modal_price": "Modal Price (₹/qtl)", "modal price": "Modal Price (₹/qtl)",
-        "modal price (₹/qtl)": "Modal Price (₹/qtl)", "price": "Modal Price (₹/qtl)",
-        "arrival": "Arrival Quantity", "arrivals": "Arrival Quantity",
+        "modal price (₹/qtl)": "Modal Price (₹/qtl)", "modal price (rs/qtl)": "Modal Price (₹/qtl)", "modal price (rs/qtl.)": "Modal Price (₹/qtl)", "price": "Modal Price (₹/qtl)",
+        "arrival": "Arrival Quantity", "arrivals": "Arrival Quantity", "arrivals (tonnes)": "Arrival Quantity", "arrivals (qtl)": "Arrival Quantity", "arrival (qtl)": "Arrival Quantity", "arrivals (in tonnes)": "Arrival Quantity",
         "arrival qtl": "Arrival Quantity", "arrival quantity": "Arrival Quantity",
         "arrival quantity (tonnes)": "Arrival Quantity", "arrival (tonnes)": "Arrival Quantity",
         "quantity": "Arrival Quantity", "avg price rs qtl": "Modal Price (₹/qtl)",
@@ -185,6 +298,28 @@ data_source = None
 live_df = None
 history_df = None
 api_errors = []
+
+agmarknet_df = None
+agmarknet_errors = []
+with st.expander("AGMARKNET live connection (official price & arrival source)", expanded=not bool(get_api_key())):
+    st.write("This connector uses the public AGMARKNET 2.0 API behind the Daily Price and Arrival Report. No data.gov.in API key is needed for this connection.")
+    if st.button("Test / load AGMARKNET live data", key="load_agmarknet", use_container_width=True):
+        fetch_agmarknet_data.clear()
+        try:
+            with st.spinner("Connecting to official AGMARKNET and loading recent monthly reports…"):
+                agmarknet_df = fetch_agmarknet_data()
+            st.session_state["agmarknet_live_rows"] = agmarknet_df
+            st.session_state["agmarknet_live_errors"] = agmarknet_df.attrs.get("state_errors", [])
+            st.success(f"AGMARKNET returned {len(agmarknet_df):,} rows.")
+        except Exception as exc:
+            st.session_state["agmarknet_live_error"] = f"{type(exc).__name__}: {str(exc)[:350]}"
+            st.error("AGMARKNET data could not be loaded. Details: " + st.session_state["agmarknet_live_error"])
+    if st.session_state.get("agmarknet_live_error"):
+        st.caption("Last connection result: " + st.session_state["agmarknet_live_error"])
+    if st.session_state.get("agmarknet_live_errors"):
+        st.warning("Some state/month queries were empty or failed: " + "; ".join(st.session_state["agmarknet_live_errors"][:8]))
+if st.session_state.get("agmarknet_live_rows") is not None:
+    agmarknet_df = st.session_state["agmarknet_live_rows"].copy()
 if api_key:
     try:
         with st.spinner("Connecting to Government of India mandi data for six states…"):
