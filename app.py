@@ -275,53 +275,71 @@ def read_uploaded_file(upload):
     return pd.read_csv(upload)
 
 def build_forecast(history, target_col, horizon):
-    """Simple transparent lag-feature ML model; only returns a model when enough daily history exists."""
+    """Train a lag-feature model on actual dated observations; interpolate only short gaps."""
     from sklearn.ensemble import RandomForestRegressor
     from sklearn.metrics import mean_absolute_error
-    from sklearn.model_selection import train_test_split
 
-    daily = history.dropna(subset=["Arrival Date", target_col]).groupby("Arrival Date", as_index=False)[target_col].mean()
-    daily = daily.sort_values("Arrival Date").set_index("Arrival Date").asfreq("D")
-    daily[target_col] = daily[target_col].interpolate(limit=3).ffill().bfill()
-    values = daily[target_col].dropna()
-    if len(values) < 18:
-        return None, None, "At least 18 dated daily observations are required for the ML forecast."
+    if "Arrival Date" not in history.columns or target_col not in history.columns:
+        return None, None, f"Required columns are missing: Arrival Date and {target_col}."
+    clean = history.dropna(subset=["Arrival Date", target_col]).copy()
+    if clean.empty:
+        return None, None, f"No valid dated numeric observations were found for {target_col}."
+    clean["Arrival Date"] = pd.to_datetime(clean["Arrival Date"], errors="coerce").dt.normalize()
+    clean[target_col] = pd.to_numeric(clean[target_col], errors="coerce")
+    clean = clean.dropna(subset=["Arrival Date", target_col])
+    daily = clean.groupby("Arrival Date")[target_col].mean().sort_index()
+    if len(daily) < 12:
+        return None, None, f"Only {len(daily)} distinct dates have valid {target_col} values. At least 12 distinct dates are required."
+    # Fill only short gaps; do not create predictions from long missing periods.
+    full_index = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+    values = daily.reindex(full_index)
+    values.index.name = "Arrival Date"
+    values = values.interpolate(method="time", limit=3, limit_area="inside")
+    values = values.dropna()
+    if len(values) < 12:
+        return None, None, f"After excluding long date gaps, only {len(values)} usable daily values remain for {target_col}."
     data = pd.DataFrame({"y": values})
-    for lag in [1, 2, 3, 7, 14]:
+    # Shorter lags make the model trainable with a practical amount of real history.
+    for lag in [1, 2, 3]:
         data[f"lag_{lag}"] = data["y"].shift(lag)
-    data["rolling_7"] = data["y"].shift(1).rolling(7).mean()
+    data["rolling_3"] = data["y"].shift(1).rolling(3).mean()
     data["day_of_year"] = data.index.dayofyear
     data["day_of_week"] = data.index.dayofweek
     data = data.dropna()
-    if len(data) < 12:
-        return None, None, "There are not enough complete lag features for a meaningful forecast."
-    features = [c for c in data.columns if c != "y"]
-    split = max(8, int(len(data) * 0.8))
+    if len(data) < 8:
+        return None, None, f"Only {len(data)} training rows remain for {target_col}; add more dated history."
+    features = [col for col in data.columns if col != "y"]
+    split = max(6, int(len(data) * 0.8))
     if len(data) - split < 2:
         split = len(data) - 2
+    if split < 4 or len(data) - split < 2:
+        return None, None, f"Not enough rows for a reliable chronological evaluation of {target_col}."
     train, test = data.iloc[:split], data.iloc[split:]
-    model = RandomForestRegressor(n_estimators=250, min_samples_leaf=2, random_state=42, n_jobs=-1)
+    model = RandomForestRegressor(n_estimators=200, min_samples_leaf=2, random_state=42, n_jobs=-1)
     model.fit(train[features], train["y"])
     mae = mean_absolute_error(test["y"], model.predict(test[features]))
-    full_model = RandomForestRegressor(n_estimators=250, min_samples_leaf=2, random_state=42, n_jobs=-1)
+    full_model = RandomForestRegressor(n_estimators=200, min_samples_leaf=2, random_state=42, n_jobs=-1)
     full_model.fit(data[features], data["y"])
     work = values.copy()
     forecast_rows = []
     last_date = values.index.max()
     for step in range(1, horizon + 1):
-        next_date = last_date + pd.Timedelta(days=step)
+        next_date = last_date + pd.Timedelta(days=1)
         def lag_val(n):
             ix = next_date - pd.Timedelta(days=n)
-            return float(work.loc[ix]) if ix in work.index else float(work.iloc[-min(n, len(work))])
+            if ix in work.index and pd.notna(work.loc[ix]):
+                return float(work.loc[ix])
+            prior = work.loc[work.index < next_date].dropna()
+            return float(prior.iloc[-min(n, len(prior))])
         row = {
             "lag_1": lag_val(1), "lag_2": lag_val(2), "lag_3": lag_val(3),
-            "lag_7": lag_val(7), "lag_14": lag_val(14),
-            "rolling_7": float(work.loc[work.index < next_date].tail(7).mean()),
+            "rolling_3": float(work.loc[work.index < next_date].dropna().tail(3).mean()),
             "day_of_year": next_date.dayofyear, "day_of_week": next_date.dayofweek,
         }
         pred = max(0.0, float(full_model.predict(pd.DataFrame([row])[features])[0]))
         work.loc[next_date] = pred
         forecast_rows.append({"Forecast Date": next_date, f"Predicted {target_col}": round(pred, 2)})
+        last_date = next_date
     return pd.DataFrame(forecast_rows), float(mae), None
 
 st.title("🌾 KRBL Mandi AI — India Paddy Price Intelligence")
@@ -550,9 +568,20 @@ st.download_button("Download filtered records (CSV)", df.to_csv(index=False).enc
 
 st.divider()
 st.subheader("Forecast centre")
+with st.expander("Forecast data check", expanded=False):
+    st.write("Forecast input columns detected in the currently filtered data:")
+    st.write({
+        "Rows after filters": int(len(df)),
+        "Distinct valid dates": int(df.loc[df["Arrival Date"].notna(), "Arrival Date"].dt.normalize().nunique()) if "Arrival Date" in df.columns else 0,
+        "Price column": price_col if price_col else "Not detected",
+        "Valid numeric price rows": int(df[price_col].notna().sum()) if price_col else 0,
+        "Arrival quantity column": "Arrival Quantity" if "Arrival Quantity" in df.columns else "Not detected",
+        "Valid numeric arrival rows": int(df["Arrival Quantity"].notna().sum()) if "Arrival Quantity" in df.columns else 0,
+        "Columns in uploaded data": list(df.columns),
+    })
 st.caption("Forecasts are calculated from the currently filtered rows and averaged by date. If multiple mandis or varieties are selected, this is an aggregate forecast—not a separate forecast for each mandi/variety.")
 horizon = st.slider("Forecast horizon (days)", 1, 7, 3)
-if price_col and df[price_col].notna().sum() >= 18:
+if price_col and df[price_col].notna().sum() >= 12:
     with st.spinner("Training price model and evaluating a time-ordered holdout…"):
         forecasts, mae, err = build_forecast(df, price_col, horizon)
     if err:
@@ -568,9 +597,9 @@ if price_col and df[price_col].notna().sum() >= 18:
         st.download_button("Download price forecast (CSV)", forecasts.to_csv(index=False).encode("utf-8-sig"),
                            "krbl_price_forecast.csv", "text/csv")
 else:
-    st.info("Price ML forecast requires at least 18 dated observations with numeric modal prices. Upload the historical workbook if the live API is unavailable.")
+    st.info("Price forecast needs at least 12 distinct dates with numeric modal prices. If this message appears, check that your Excel has a Date/Arrival Date column and Avg_Price_Rs_Qtl/Modal Price values.")
 
-if "Arrival Quantity" in df.columns and df["Arrival Quantity"].notna().sum() >= 18:
+if "Arrival Quantity" in df.columns and df["Arrival Quantity"].notna().sum() >= 12:
     with st.spinner("Training arrival model…"):
         arr_forecast, arr_mae, arr_err = build_forecast(df, "Arrival Quantity", horizon)
     st.subheader("Arrival forecast")
@@ -585,7 +614,7 @@ if "Arrival Quantity" in df.columns and df["Arrival Quantity"].notna().sum() >= 
         st.download_button("Download arrival forecast (CSV)", arr_forecast.to_csv(index=False).encode("utf-8-sig"),
                            "krbl_arrival_forecast.csv", "text/csv")
 else:
-    st.info("Arrival forecast needs at least 18 dated arrival-quantity observations. The current government price resource may not supply arrival quantity; use a workbook that includes a date and arrival quantity column.")
+    st.info("Arrival forecast needs at least 12 distinct dates with numeric arrival quantities. Check that your Excel has Date/Arrival Date and Arrival_Qtl/Arrival Quantity columns.")
 
 st.divider()
 st.caption("Sources: Government of India OGD / AGMARKNET and uploaded historical workbook. Price observations are daily and may be delayed. Official source: https://www.data.gov.in/resource/current-daily-price-various-commodities-various-markets-mandi. Forecasts are estimates; do not interpret as guaranteed purchase prices.")
