@@ -7,160 +7,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 st.set_page_config(page_title="KRBL Mandi AI | Paddy Intelligence", page_icon="🌾", layout="wide")
+ENAM_DASHBOARD = "https://enam.gov.in/dashboard"
+DELHI_MARKET_BOARD = "https://delagrimarket.nic.in/"
 RESOURCE_ID = "9ef84268-d588-465a-a308-a864a43d0070"
 API_URL = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
-
-AGMARKNET_BASE = "https://api.agmarknet.gov.in/v1"
-AGMARKNET_STATES = ["Punjab", "Haryana", "Uttar Pradesh", "Rajasthan", "Uttarakhand", "Delhi"]
-
-def agmarknet_session():
-    session = requests.Session()
-    retry = Retry(
-        total=2, connect=2, read=1, backoff_factor=1.0,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"], raise_on_status=False,
-    )
-    session.mount("https://", HTTPAdapter(max_retries=retry))
-    session.headers.update({
-        "Accept": "application/json, text/plain, */*",
-        "Origin": "https://agmarknet.gov.in",
-        "Referer": "https://agmarknet.gov.in/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-    })
-    return session
-
-def _walk_dicts(value):
-    if isinstance(value, dict):
-        yield value
-        for child in value.values():
-            yield from _walk_dicts(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from _walk_dicts(child)
-
-def _find_metadata_id(payload, terms, kind):
-    """Resolve IDs from AGMARKNET's actual short-key filter arrays as well as alternate schemas."""
-    if not isinstance(payload, (dict, list)):
-        return None, None
-    data = payload.get("data", {}) if isinstance(payload, dict) else {}
-    short_key = {"state": "state_data", "commodity": "cmdt_data"}[kind]
-    rows = data.get(short_key, []) if isinstance(data, dict) else []
-    # Explicitly inspect the named array first: API fields are commonly abbreviated (state_name/cmdt_name).
-    if isinstance(rows, list):
-        id_candidates = {
-            "state": ("state_id", "stateId", "stateid", "state_code", "stateCode", "id", "value"),
-            "commodity": ("cmdt_id", "cmdtId", "cmdtid", "commodity_id", "commodityId", "commodityid", "comm_id", "commId", "commodity_code", "commodityCode", "id", "value"),
-        }[kind]
-        name_candidates = {
-            "state": ("state_name", "stateName", "statename", "state_desc", "stateDesc", "name", "label", "state"),
-            "commodity": ("cmdt_name", "cmdtName", "cmdtname", "cmdt_desc", "cmdtDesc", "commodity_name", "commodityName", "commodityname", "commodity_desc", "commodityDesc", "commodity_description", "comm_name", "commName", "commodity_name_en", "name", "label", "commodity"),
-        }[kind]
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            name = next((str(row[k]) for k in name_candidates if row.get(k) is not None), "")
-            ident = next((row[k] for k in id_candidates if row.get(k) is not None), None)
-            norm = " ".join(name.lower().replace("(dhan)", "").replace("(common)", "").replace("-", " ").split())
-            if ident is not None and name and any(term in norm for term in terms):
-                return ident, name
-    # Fallback for nested or alternate API payloads.
-    id_keys = {
-        "state": ("state_id", "stateId", "stateid", "state_code", "stateCode", "id", "value"),
-        "commodity": ("cmdt_id", "cmdtId", "cmdtid", "commodity_id", "commodityId", "commodityid", "comm_id", "commId", "commodity_code", "commodityCode", "id", "value"),
-    }[kind]
-    name_keys = {
-        "state": ("state_name", "stateName", "statename", "state_desc", "stateDesc", "name", "label", "state"),
-        "commodity": ("cmdt_name", "cmdtName", "cmdtname", "cmdt_desc", "cmdtDesc", "commodity_name", "commodityName", "commodityname", "commodity_desc", "commodityDesc", "commodity_description", "comm_name", "commName", "commodity_name_en", "name", "label", "commodity"),
-    }[kind]
-    candidates = []
-    for item in _walk_dicts(payload):
-        name = next((str(item[k]) for k in name_keys if k in item and item[k] is not None), "")
-        ident = next((item[k] for k in id_keys if k in item and item[k] is not None), None)
-        norm = " ".join(name.lower().replace("(dhan)", "").replace("(common)", "").replace("-", " ").split())
-        if name and ident is not None and any(term in norm for term in terms):
-            candidates.append((name, ident))
-    return (candidates[0][1], candidates[0][0]) if candidates else (None, None)
-
-def _extract_record_list(payload):
-    """Extract a list of row dictionaries from varying AGMARKNET JSON envelopes."""
-    if isinstance(payload, list) and payload and all(isinstance(x, dict) for x in payload):
-        return payload
-    best = []
-    for item in _walk_dicts(payload):
-        for value in item.values():
-            if isinstance(value, list) and value and all(isinstance(x, dict) for x in value):
-                if len(value) > len(best):
-                    best = value
-    return best
-
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_agmarknet_data():
-    """Fetch official AGMARKNET price/arrival observations for the six requested states."""
-    session = agmarknet_session()
-    base = AGMARKNET_BASE
-    filters_response = session.get(f"{base}/daily-price-arrival/filters", timeout=(12, 45))
-    filters_response.raise_for_status()
-    metadata = filters_response.json()
-    if not isinstance(metadata, (dict, list)):
-        raise ValueError("AGMARKNET filter endpoint returned an unexpected response.")
-    now = pd.Timestamp.now().normalize()
-    previous_month = now - pd.DateOffset(months=1)
-    months = [(now.year, now.month), (previous_month.year, previous_month.month)]
-    frames, errors = [], []
-    for state in AGMARKNET_STATES:
-        state_id, state_label = _find_metadata_id(metadata, [state.lower()], "state")
-        if state_id is None:
-            errors.append(f"{state}: state ID not found in AGMARKNET filters")
-            continue
-        # Try common paddy labels; the exact label and ID are taken from official filter metadata.
-        commodity_id, commodity_label = _find_metadata_id(
-            metadata,
-            ["paddy dhan basmati", "basmati", "paddy dhan common", "paddy", "dhan"],
-            "commodity",
-        )
-        if commodity_id is None:
-            # The AGMARKNET filter payload uses short keys such as cmdt_data.
-            # Include a small sample of that exact list in diagnostics to expose the real schema.
-            data_block = metadata.get("data") if isinstance(metadata, dict) else None
-            cmdt_data = data_block.get("cmdt_data") if isinstance(data_block, dict) else None
-            cmdt_sample = repr(cmdt_data[:5] if isinstance(cmdt_data, list) else cmdt_data)[:1400]
-            top_keys = list(metadata.keys())[:20] if isinstance(metadata, dict) else ["<top-level list>"]
-            data_keys = list(data_block.keys())[:30] if isinstance(data_block, dict) else []
-            raise RuntimeError(
-                "Paddy commodity ID not found in AGMARKNET filters. "
-                f"Top-level keys: {top_keys}; data keys: {data_keys}; "
-                f"cmdt_data sample: {cmdt_sample}"
-            )
-        for year, month in months:
-            try:
-                resp = session.get(
-                    f"{base}/prices-and-arrivals/date-wise/specific-commodity",
-                    params={"year": year, "month": month, "stateId": state_id, "commodityId": commodity_id,
-                            "includeExcel": "false"},
-                    timeout=(12, 45),
-                )
-                resp.raise_for_status()
-                rows = _extract_record_list(resp.json())
-                if not rows:
-                    continue
-                frame = standardize_columns(pd.DataFrame(rows))
-                if "State" not in frame.columns:
-                    frame["State"] = state
-                frames.append(frame)
-            except requests.exceptions.HTTPError as exc:
-                response = getattr(exc, "response", None)
-                status = getattr(response, "status_code", "unknown")
-                body = (getattr(response, "text", "") or "").replace("\\n", " ").strip()[:140]
-                errors.append(f"{state} {year}-{month:02d}: HTTP {status} {body}")
-            except Exception as exc:
-                errors.append(f"{state} {year}-{month:02d}: {type(exc).__name__}: {str(exc)[:100]}")
-    if not frames:
-        raise RuntimeError("AGMARKNET API responded, but no usable price/arrival rows were returned. " + "; ".join(errors[:8]))
-    result = pd.concat(frames, ignore_index=True, sort=False)
-    result.attrs["state_errors"] = errors
-    result.attrs["api_rows_fetched"] = len(result)
-    result.attrs["commodity_label"] = commodity_label
-    return result
 
 st.markdown("""
 <style>
@@ -178,15 +28,15 @@ def get_api_key():
 def standardize_columns(frame):
     df = frame.copy()
     aliases = {
-        "state": "State", "state name": "State", "district": "District", "district name": "District",
-        "market": "Market", "mandi": "Market", "market name": "Market", "commodity": "Commodity",
+        "state": "State", "state name": "State", "state/ut": "State", "district": "District", "district name": "District",
+        "market": "Market", "mandi": "Market", "market name": "Market", "apmc": "Market", "apmc name": "Market", "market name/apmc": "Market", "commodity": "Commodity", "commodity name": "Commodity",
         "crop": "Commodity", "variety": "Variety", "grade": "Grade", "arrival_date": "Arrival Date",
         "arrival date": "Arrival Date", "date": "Arrival Date", "price date": "Arrival Date", "reported date": "Arrival Date",
-        "min_price": "Min Price (₹/qtl)", "min price": "Min Price (₹/qtl)",
-        "max_price": "Max Price (₹/qtl)", "max price": "Max Price (₹/qtl)",
-        "modal_price": "Modal Price (₹/qtl)", "modal price": "Modal Price (₹/qtl)",
+        "min_price": "Min Price (₹/qtl)", "min price": "Min Price (₹/qtl)", "min price (rs/qtl)": "Min Price (₹/qtl)", "min price (per quintal)": "Min Price (₹/qtl)",
+        "max_price": "Max Price (₹/qtl)", "max price": "Max Price (₹/qtl)", "max price (rs/qtl)": "Max Price (₹/qtl)", "max price (per quintal)": "Max Price (₹/qtl)",
+        "modal_price": "Modal Price (₹/qtl)", "modal price": "Modal Price (₹/qtl)", "last traded price": "Modal Price (₹/qtl)", "last traded price (per quintal)": "Modal Price (₹/qtl)", "price (rs/qtl)": "Modal Price (₹/qtl)",
         "modal price (₹/qtl)": "Modal Price (₹/qtl)", "modal price (rs/qtl)": "Modal Price (₹/qtl)", "modal price (rs/qtl.)": "Modal Price (₹/qtl)", "price": "Modal Price (₹/qtl)",
-        "arrival": "Arrival Quantity", "arrivals": "Arrival Quantity", "arrivals (tonnes)": "Arrival Quantity", "arrivals (qtl)": "Arrival Quantity", "arrival (qtl)": "Arrival Quantity", "arrivals (in tonnes)": "Arrival Quantity",
+        "arrival": "Arrival Quantity", "arrivals": "Arrival Quantity", "commodity arrivals": "Arrival Quantity", "commodity arrivals (quintal)": "Arrival Quantity", "arrivals (quintal)": "Arrival Quantity", "arrivals (tonnes)": "Arrival Quantity", "arrivals (qtl)": "Arrival Quantity", "arrival (qtl)": "Arrival Quantity", "arrivals (in tonnes)": "Arrival Quantity",
         "arrival qtl": "Arrival Quantity", "arrival quantity": "Arrival Quantity",
         "arrival quantity (tonnes)": "Arrival Quantity", "arrival (tonnes)": "Arrival Quantity",
         "quantity": "Arrival Quantity", "avg price rs qtl": "Modal Price (₹/qtl)",
@@ -362,78 +212,36 @@ st.title("🌾 KRBL Mandi AI — India Paddy Price Intelligence")
 st.caption("Government OGD price feed + scheduled snapshot fallback + authorized KRBL purchase data. Only verified records are shown; forecasts are estimates.")
 
 with st.sidebar:
-    st.header("Data configuration")
-    api_key = st.text_input("data.gov.in API key", value=get_api_key(), type="password",
-                            help="Keep the key private. For deployment use Streamlit App settings → Secrets.")
-    limit = st.select_slider("Government API page size", options=[250, 500, 1000], value=1000,
-                             help="Downloads multiple official OGD pages (up to 30) and then filters to Punjab, Haryana, Uttar Pradesh, Rajasthan, Uttarakhand and Delhi. Full coverage depends on API availability and the reported total.")
-    if st.button("Load / refresh OGD data", use_container_width=True):
-        fetch_data.clear()
-        st.session_state["run_ogd_fetch"] = True
-        st.rerun()
-    st.divider()
-    st.caption("Government source: OGD / AGMARKNET")
-    st.markdown("[Open official mandi dataset](https://www.data.gov.in/resource/current-daily-price-various-commodities-various-markets-mandi)")
+    st.header("Data source")
+    st.markdown("[Open official e-NAM dashboard](https://enam.gov.in/dashboard)")
+    st.markdown("[Open Delhi Agricultural Marketing Board rates](https://delagrimarket.nic.in/)")
+    st.caption("AGMARKNET / data.gov.in feed has been removed from this app. e-NAM data is loaded only from an official report you upload; the app does not pretend the website is an unrestricted API.")
 
-df = None
-data_source = None
-live_df = None
-history_df = None
-api_errors = []
+st.title("🌾 KRBL Mandi AI — India Paddy Price Intelligence")
+st.caption("Official e-NAM report import + user-provided history. No demo records. KPIs use the latest available observation date in the selected filters.")
 
-agmarknet_df = None
-agmarknet_errors = []
-with st.expander("AGMARKNET live connection (official price & arrival source)", expanded=not bool(get_api_key())):
-    st.write("The direct AGMARKNET report endpoint is CAPTCHA-protected and cannot be used for unattended loading. Use the official data.gov.in OGD connector instead.")
-    if st.button("Test AGMARKNET connection (CAPTCHA protected)", key="load_agmarknet", use_container_width=True):
-        fetch_agmarknet_data.clear()
-        try:
-            with st.spinner("Connecting to official AGMARKNET and loading recent monthly reports…"):
-                agmarknet_df = fetch_agmarknet_data()
-            st.session_state["agmarknet_live_rows"] = agmarknet_df
-            st.session_state["agmarknet_live_errors"] = agmarknet_df.attrs.get("state_errors", [])
-            st.success(f"AGMARKNET returned {len(agmarknet_df):,} rows.")
-        except Exception as exc:
-            st.session_state["agmarknet_live_error"] = f"{type(exc).__name__}: {str(exc)[:350]}"
-            st.error("Direct AGMARKNET report access is blocked by CAPTCHA. Use the official OGD connector instead. Details: " + st.session_state["agmarknet_live_error"])
-    if st.session_state.get("agmarknet_live_error"):
-        st.caption("Last connection result: " + st.session_state["agmarknet_live_error"])
-    if st.session_state.get("agmarknet_live_errors"):
-        st.warning("Some state/month queries were empty or failed: " + "; ".join(st.session_state["agmarknet_live_errors"][:8]))
-if st.session_state.get("agmarknet_live_rows") is not None:
-    agmarknet_df = st.session_state["agmarknet_live_rows"].copy()
-if api_key and st.session_state.get("run_ogd_fetch", False):
-    # Consume the one-shot request before networking so reruns never repeat slow API calls.
-    st.session_state["run_ogd_fetch"] = False
+st.subheader("Official e-NAM data")
+st.write("Download or export the relevant trade/price report from the official e-NAM dashboard, then upload it here. Only the uploaded report is treated as e-NAM data; if e-NAM does not provide Narela / Paddy 1509 records, the dashboard will not invent them.")
+enam_upload = st.file_uploader(
+    "Upload official e-NAM report (CSV / Excel)",
+    type=["csv", "xlsx", "xls"],
+    key="enam_report_upload",
+)
+enam_df = None
+if enam_upload is not None:
     try:
-        with st.spinner("Connecting to the official Government of India mandi dataset…"):
-            live_df = fetch_data(api_key, limit)
-        api_errors = live_df.attrs.get("state_errors", [])
-        latest_api_date = live_df["Arrival Date"].max() if "Arrival Date" in live_df.columns else pd.NaT
-        date_note = latest_api_date.strftime("%d %b %Y") if pd.notna(latest_api_date) else "date unavailable"
-        st.success(f"Government API responded — {len(live_df):,} official records returned. Latest observation in fetched rows: {date_note}.")
-        if api_errors:
-            st.warning("Some state requests returned no rows or failed: " + "; ".join(api_errors))
-        st.caption(f"Official OGD pagination: {live_df.attrs.get('api_pages_fetched', 'unknown')} page(s), {live_df.attrs.get('api_rows_downloaded', len(live_df)):,} rows downloaded; reported nationwide total: {live_df.attrs.get('api_total_records', 'not supplied')}. Full nationwide coverage fetched: {'Yes' if live_df.attrs.get('api_complete') else 'No / not confirmed'}. Results are filtered to the six configured states; prices are daily published observations, not tick-by-tick live data.")
-    except requests.exceptions.Timeout:
-        st.warning("Government API timed out. Historical Excel will remain available; no sample/live-looking data is substituted.")
-    except requests.exceptions.ConnectionError:
-        st.warning("Could not connect to api.data.gov.in from this hosting environment. Historical Excel remains available.")
-    except requests.exceptions.HTTPError as exc:
-        status = getattr(exc.response, "status_code", None)
-        st.warning(f"Government API returned HTTP {status or 'error'}. Check the API key, resource access and portal status.")
-    except Exception as exc:
-        diagnostic = str(exc).replace(api_key, "[REDACTED_API_KEY]") if api_key else str(exc)
-        if isinstance(exc, RuntimeError) and "ConnectTimeout" in diagnostic or "HTTPSConnectionPool" in diagnostic:
-            st.warning("Government API connection timed out from the hosting environment. This is a network/API reachability issue, not proof that the API key is invalid. Historical workbook mode remains available.")
-            with st.expander("Connection diagnostics"):
-                st.code(f"{type(exc).__name__}: {diagnostic[:700]}")
+        enam_df = standardize_columns(read_uploaded_file(enam_upload))
+        if "Arrival Date" not in enam_df.columns:
+            st.error("e-NAM report needs a recognizable date column. Rename it to Date or Arrival Date and upload again.")
+            enam_df = None
         else:
-            st.warning(f"Government data could not be loaded. Exact diagnostic: {type(exc).__name__}: {diagnostic[:700]}. Historical workbook mode remains available.")
-elif not api_key:
-    st.info("OGD API key not configured. AGMARKNET can be tested separately in the section above; no key is needed for that connector.")
-else:
-    st.info("OGD is the recommended official data source. Click 'Load / refresh OGD data' in the sidebar to fetch current published records.")
+            enam_df = enam_df.drop_duplicates().reset_index(drop=True)
+            enam_df["Data Source"] = "e-NAM official report (uploaded)"
+            st.success(f"e-NAM report imported: {len(enam_df):,} rows. This is uploaded report data, not an automatic live API connection.")
+            st.caption("Source: e-NAM official dashboard. Confirm the report date and units before using prices for procurement.")
+    except Exception as exc:
+        st.error(f"Could not read the e-NAM report ({type(exc).__name__}): {str(exc)[:180]}")
+        enam_df = None
 
 st.subheader("Master Excel — daily data update")
 st.write(
@@ -508,44 +316,26 @@ elif master_df is not None:
     history_df["Data Source"] = "Master Excel"
     st.info("Master history is loaded. Upload today's file above to append new rows, or continue forecasting from the master as-is.")
 
-# If the live request from Streamlit Cloud fails, use the latest verified snapshot
-# written by the scheduled GitHub Actions workflow. Never fabricate records.
-if live_df is None and os.path.exists("data/ogd_latest.csv"):
-    try:
-        cached_df = standardize_columns(pd.read_csv("data/ogd_latest.csv"))
-        if not cached_df.empty and "Arrival Date" in cached_df.columns:
-            cached_df.attrs["cached"] = True
-            live_df = cached_df
-            st.info(
-                "Live government API is unreachable from this session. Showing the latest "
-                "GitHub Actions data snapshot instead; check the observation date before use."
-            )
-    except Exception as cache_exc:
-        st.warning(f"Could not read the saved government-data snapshot: {type(cache_exc).__name__}: {str(cache_exc)[:180]}")
-
-if live_df is not None:
-    live_df["Data Source"] = "Government OGD/AGMARKNET (scheduled snapshot)" if live_df.attrs.get("cached") else "Government OGD/AGMARKNET"
-if live_df is not None and history_df is not None:
-    # Union schemas without overwriting the historical workbook's original observations.
-    df = pd.concat([history_df, live_df], ignore_index=True, sort=False)
-    data_source = "Combined: Historical Excel + Government OGD/AGMARKNET"
+df = None
+data_source = None
+if enam_df is not None:
+    df = enam_df.copy()
+    data_source = "e-NAM official report (uploaded)"
 elif history_df is not None:
     df = history_df.copy()
-    data_source = "Historical Excel"
-elif live_df is not None:
-    df = live_df.copy()
-    data_source = "Government OGD/AGMARKNET"
+    data_source = "Historical Excel (user-uploaded; not government-live)"
 
 if df is None:
     st.markdown("### Government data connection")
-    st.error("No verified government records are available in this session. The live API request or saved official snapshot is unavailable.")
-    st.write("Demo/sample records are disabled. This dashboard will show real records only after the official feed connects or you upload a verified data workbook.")
-    st.markdown("- Check the [official data.gov.in portal](https://www.data.gov.in/).")
-    st.markdown("- Keep the API key in Streamlit Secrets; never publish it in GitHub or screenshots.")
-    st.markdown("- Upload a verified master Excel above to use the dashboard while the API is unavailable.")
+    st.error("No e-NAM report or historical workbook is loaded. No prices are being displayed.")
+    st.write("Download a report from the official e-NAM dashboard and upload it above, or upload a verified historical workbook. The app does not generate sample mandi prices.")
+    st.markdown("- [Official e-NAM dashboard](https://enam.gov.in/dashboard)")
+    st.markdown("- [Delhi Agricultural Marketing Board](https://delagrimarket.nic.in/)")
     st.stop()
 
 st.caption(f"Current data source: **{data_source}**")
+if data_source == "Historical Excel (user-uploaded; not government-live)":
+    st.warning("Historical Excel is user-provided data, not a verified live government feed. Check its source and observation date before relying on it.")
 if "State" in df.columns:
     st.caption("State coverage in loaded records: " + ", ".join(sorted(df["State"].dropna().astype(str).unique())))
 if "Market" in df.columns and "District" in df.columns:
@@ -561,7 +351,7 @@ if "Commodity" in df.columns:
     selected = st.multiselect("Commodity / Variety coverage", commodities, default=defaults or commodities)
     if selected:
         df = df[df["Commodity"].astype(str).isin(selected)]
-    elif data_source == "Live government API":
+    elif data_source == "e-NAM official report (uploaded)":
         st.info("No commodity selected, so all fetched commodities are shown.")
 for col in ["State", "District", "Market", "Variety", "Data Source"]:
     if col in df.columns:
@@ -570,18 +360,35 @@ for col in ["State", "District", "Market", "Variety", "Data Source"]:
         if selected:
             df = df[df[col].astype(str).isin(selected)]
 
+# Drop invalid/placeholder prices; preserve rows with missing prices for arrival analysis.
 price_col = "Modal Price (₹/qtl)" if "Modal Price (₹/qtl)" in df.columns else None
-if price_col and df[price_col].notna().any():
-    a, b, c, d = st.columns(4)
-    a.metric("Average modal price", f"₹{df[price_col].mean():,.0f}/qtl")
-    b.metric("Lowest modal price", f"₹{df[price_col].min():,.0f}/qtl")
-    c.metric("Highest modal price", f"₹{df[price_col].max():,.0f}/qtl")
-    d.metric("Records", f"{len(df):,}")
-else:
-    st.warning("Modal-price column was not found or has no numeric values. Expected column: Modal Price (₹/qtl).")
+if price_col:
+    df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
+    invalid_price_count = int((df[price_col].notna() & (df[price_col] <= 0)).sum())
+    df.loc[df[price_col] <= 0, price_col] = pd.NA
+    if invalid_price_count:
+        st.warning(f"{invalid_price_count:,} zero/negative price value(s) were excluded from price calculations.")
+    df = df.drop_duplicates().reset_index(drop=True)
 
 if df["Arrival Date"].notna().any():
-    st.caption("Latest observation date in the selected data: " + df["Arrival Date"].max().strftime("%d %b %Y"))
+    latest_observation = df["Arrival Date"].max().normalize()
+    st.caption("Latest observation date in selected records: " + latest_observation.strftime("%d %b %Y"))
+    latest_day_df = df[df["Arrival Date"].dt.normalize() == latest_observation].copy()
+else:
+    latest_observation = None
+    latest_day_df = df.iloc[0:0].copy()
+
+if price_col and latest_day_df[price_col].notna().any():
+    latest_prices = latest_day_df[price_col].dropna()
+    a, b, c, d = st.columns(4)
+    a.metric("Latest-day average modal price", f"₹{latest_prices.mean():,.0f}/qtl")
+    b.metric("Latest-day lowest modal price", f"₹{latest_prices.min():,.0f}/qtl")
+    c.metric("Latest-day highest modal price", f"₹{latest_prices.max():,.0f}/qtl")
+    d.metric("Latest-day price records", f"{len(latest_prices):,}")
+    st.caption("Price KPIs use only records from the latest date after filters. They are not a claim of today's price unless the report itself is dated today.")
+else:
+    st.warning("No valid positive modal-price values are available for the latest observation date in the selected data.")
+
 st.subheader("Trend overview")
 chart_left, chart_right = st.columns(2)
 with chart_left:
@@ -653,5 +460,5 @@ else:
     st.info("Arrival forecast needs at least 12 distinct dates with numeric arrival quantities. Check that your Excel has Date/Arrival Date and Arrival_Qtl/Arrival Quantity columns.")
 
 st.divider()
-st.caption("Sources: Government of India OGD / AGMARKNET and uploaded historical workbook. Price observations are daily and may be delayed. Official source: https://www.data.gov.in/resource/current-daily-price-various-commodities-various-markets-mandi. Forecasts are estimates; do not interpret as guaranteed purchase prices.")
+st.caption("Sources: uploaded official e-NAM report or user-provided historical workbook. Uploaded report date and units must be verified. Forecasts are estimates, not guaranteed purchase prices.")
 
