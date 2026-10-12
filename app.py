@@ -112,8 +112,18 @@ def fetch_agmarknet_data():
                     commodity_candidates.append({str(k): str(v)[:80] for k, v in item.items() if not isinstance(v, (dict, list))})
                 if len(commodity_candidates) >= 8:
                     break
-            sample = repr(commodity_candidates[:5])[:700]
-            raise RuntimeError("Paddy commodity ID not found in AGMARKNET filters; metadata field mapping needs adjustment. Filter sample: " + sample)
+            # Include only structural keys and a short, non-sensitive response preview so
+            # the actual upstream schema can be diagnosed without exposing credentials.
+            top_keys = list(metadata.keys())[:20] if isinstance(metadata, dict) else ["<top-level list>"]
+            data_block = metadata.get("data") if isinstance(metadata, dict) else None
+            data_keys = list(data_block.keys())[:30] if isinstance(data_block, dict) else []
+            sample = repr(commodity_candidates[:5])[:500]
+            preview = repr(metadata)[:900]
+            raise RuntimeError(
+                "Paddy commodity ID not found in AGMARKNET filters. "
+                f"Top-level keys: {top_keys}; data keys: {data_keys}; "
+                f"commodity sample: {sample}; response preview: {preview}"
+            )
         for year, month in months:
             try:
                 resp = session.get(
