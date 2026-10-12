@@ -181,6 +181,7 @@ daily_upload = st.file_uploader(
     key="daily_history_upload",
 )
 master_df = None
+history_df = None
 if master_upload is not None:
     try:
         master_df = standardize_columns(read_uploaded_file(master_upload))
