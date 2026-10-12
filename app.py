@@ -44,12 +44,12 @@ def _walk_dicts(value):
 def _find_metadata_id(payload, terms, kind):
     """Find a matching state/commodity ID in the public filter metadata without hard-coded IDs."""
     id_keys = {
-        "state": ("state_id", "stateId", "stateid", "state_code", "stateCode", "id", "value"),
-        "commodity": ("commodity_id", "commodityId", "commodityid", "comm_id", "commId", "commodity_code", "commodityCode", "id", "value"),
+        "state": ("state_id", "stateId", "stateid", "state_code", "stateCode", "stateid", "id", "value"),
+        "commodity": ("commodity_id", "commodityId", "commodityid", "comm_id", "commId", "cmdt_id", "cmdtId", "cmdtid", "commodity_code", "commodityCode", "id", "value"),
     }[kind]
     name_keys = {
         "state": ("state_name", "stateName", "statename", "state_desc", "stateDesc", "name", "label", "state"),
-        "commodity": ("commodity_name", "commodityName", "commodityname", "commodity_desc", "commodityDesc", "commodity_description", "comm_name", "commName", "commodity_name_en", "name", "label", "commodity"),
+        "commodity": ("commodity_name", "commodityName", "commodityname", "cmdt_name", "cmdtName", "cmdtname", "cmdt_desc", "cmdtDesc", "commodity_desc", "commodityDesc", "commodity_description", "comm_name", "commName", "commodity_name_en", "name", "label", "commodity"),
     }[kind]
     candidates = []
     for item in _walk_dicts(payload):
